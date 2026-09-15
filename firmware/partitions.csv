@@ -1,0 +1,15 @@
+# Fox partition table (8MB flash).
+# We drop the second OTA slot to make room for the fox's data partitions; the
+# web flasher writes a full image anyway, so single factory app is fine.
+#
+# Name       Type  SubType   Offset     Size      Notes
+nvs,         data, nvs,      0x9000,    0x6000,
+otadata,     data, ota,      0xf000,    0x2000,
+phy_init,    data, phy,      0x11000,   0x1000,
+factory,     app,  factory,  0x20000,   0x260000,
+model,       data, spiffs,   0x280000,  0x2E0000,
+picotts_ta,  data, 0x40,     0x560000,  0x90000,
+picotts_sg,  data, 0x41,     0x5F0000,  0xB0000,
+foxbrain,    data, 0x45,     0x6A0000,  0xC0000,
+foxdata,     data, 0x46,     0x760000,  0x40000,
+foxfs,       data, spiffs,   0x7A0000,  0x40000,

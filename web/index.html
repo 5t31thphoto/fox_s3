@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Meet your fox</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@500;700&family=Nunito:wght@400;600;700&display=swap" rel="stylesheet">
+<script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
+<style>
+  :root{
+    --den:#171227; --den-soft:#221a3a; --paper:#fdf3e7;
+    --fur:#ff7a3d; --fur-deep:#e85f22; --cream:#ffd9a8;
+    --berry:#c8477e; --leaf:#57c08a; --ink:#2a2140;
+    --line:#3a2d55;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0}
+  body{
+    font-family:'Nunito',system-ui,sans-serif;
+    background:
+      radial-gradient(1100px 600px at 78% -8%, #2c2150 0%, transparent 60%),
+      radial-gradient(900px 500px at 8% 108%, #331d3f 0%, transparent 55%),
+      var(--den);
+    color:var(--paper); line-height:1.55; min-height:100vh;
+  }
+  .wrap{max-width:760px; margin:0 auto; padding:32px 22px 80px}
+
+  /* ---- hero: the fox greets you ---- */
+  .hero{display:flex; gap:22px; align-items:center; padding:14px 4px 26px}
+  .foxmug{flex:0 0 132px}
+  .headline{font-family:'Baloo 2',cursive; font-weight:700;
+    font-size:clamp(30px,6vw,46px); line-height:1.02; margin:0 0 6px}
+  .headline small{display:block; font-family:'Nunito'; font-weight:700;
+    font-size:15px; letter-spacing:.14em; color:var(--fur); margin-bottom:10px}
+  .sub{color:#d8cdea; max-width:46ch; margin:0}
+
+  /* fox face SVG breathes */
+  @keyframes bob{0%,100%{transform:translateY(0) rotate(-1deg)}50%{transform:translateY(-6px) rotate(1deg)}}
+  @keyframes blink{0%,92%,100%{transform:scaleY(1)}96%{transform:scaleY(.1)}}
+  .foxmug svg{animation:bob 4.5s ease-in-out infinite; transform-origin:center}
+  .foxmug .eyes{animation:blink 5.2s infinite; transform-origin:center 46px}
+  @media (prefers-reduced-motion:reduce){.foxmug svg,.foxmug .eyes{animation:none}}
+
+  /* ---- step cards ---- */
+  .step{background:linear-gradient(180deg,var(--den-soft),#1d1633);
+    border:1px solid var(--line); border-radius:20px; padding:22px 22px 24px;
+    margin:18px 0; position:relative}
+  .step h2{font-family:'Baloo 2',cursive; font-weight:700; margin:.1em 0 .5em;
+    font-size:22px; display:flex; align-items:center; gap:10px}
+  .pip{flex:0 0 30px; height:30px; border-radius:10px; display:grid;
+    place-items:center; background:var(--fur); color:#3a1400; font-weight:800;
+    font-family:'Baloo 2'; transform:rotate(-4deg)}
+
+  /* ---- pack chooser ---- */
+  .packs{display:grid; grid-template-columns:1fr 1fr; gap:14px; margin-top:6px}
+  @media(max-width:520px){.packs{grid-template-columns:1fr}}
+  .pack{cursor:pointer; border:2px solid var(--line); border-radius:16px;
+    padding:16px; background:#1b1430; transition:border-color .15s, transform .1s}
+  .pack:hover{transform:translateY(-2px)}
+  .pack.on{border-color:var(--fur); background:#241738}
+  .pack .nm{font-family:'Baloo 2'; font-weight:700; font-size:18px}
+  .pack .vo{color:var(--cream); font-size:13px; font-weight:700; margin:2px 0 8px}
+  .pack .ds{color:#ccbfe4; font-size:13.5px; margin:0}
+  .pack .pick{margin-top:10px; font-size:12px; font-weight:800; color:var(--fur);
+    visibility:hidden}
+  .pack.on .pick{visibility:visible}
+
+  /* ---- form ---- */
+  .grid{display:grid; grid-template-columns:1fr 1fr; gap:14px}
+  @media(max-width:520px){.grid{grid-template-columns:1fr}}
+  label{display:block; font-size:12.5px; font-weight:700; color:#b7a9d4;
+    margin:0 0 5px}
+  input,textarea,select{width:100%; background:#140f26; color:var(--paper);
+    border:1px solid var(--line); border-radius:12px; padding:11px 12px;
+    font:inherit; font-size:14.5px}
+  input:focus,textarea:focus,select:focus{outline:2px solid var(--fur);
+    border-color:transparent}
+  textarea{resize:vertical; min-height:64px}
+  .full{grid-column:1/-1}
+  .hint{font-size:12px; color:#9a8cbb; margin:6px 0 0}
+  .swatches{display:flex; gap:8px; flex-wrap:wrap}
+  .sw{width:34px; height:34px; border-radius:9px; border:2px solid transparent;
+    cursor:pointer}
+  .sw.on{border-color:#fff}
+
+  /* ---- buttons ---- */
+  .cta{display:inline-flex; align-items:center; gap:9px; background:var(--fur);
+    color:#3a1400; border:none; border-radius:14px; padding:13px 20px;
+    font-family:'Baloo 2'; font-weight:700; font-size:17px; cursor:pointer;
+    box-shadow:0 6px 0 var(--fur-deep); transition:transform .06s, box-shadow .06s}
+  .cta:active{transform:translateY(4px); box-shadow:0 2px 0 var(--fur-deep)}
+  .cta:disabled{opacity:.5; cursor:not-allowed; box-shadow:0 6px 0 var(--fur-deep)}
+  .ghost{background:transparent; color:var(--paper); border:1px solid var(--line);
+    box-shadow:none}
+  .ghost:active{transform:none}
+  esp-web-install-button{--esp-tools-button-color:#3a1400;}
+  .row{display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-top:8px}
+
+  .say{background:#160f2b; border-left:3px solid var(--berry); padding:10px 14px;
+    border-radius:0 12px 12px 0; margin:14px 0 0; font-style:italic; color:#e9deff}
+  .ok{color:var(--leaf); font-weight:800}
+  .warn{color:#ffb454}
+  code{background:#0f0a1f; padding:1px 6px; border-radius:6px; font-size:13px}
+  a{color:var(--fur)}
+  footer{color:#8a7cab; font-size:12.5px; text-align:center; margin-top:34px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="hero">
+    <div class="foxmug" aria-hidden="true">
+      <svg viewBox="0 0 132 132" width="132" height="132">
+        <ellipse cx="66" cy="70" rx="46" ry="42" fill="var(--fur)"/>
+        <ellipse cx="66" cy="86" rx="27" ry="21" fill="var(--cream)"/>
+        <path d="M30 44 L44 8 L58 40 Z" fill="var(--fur)"/>
+        <path d="M102 44 L88 8 L74 40 Z" fill="var(--fur)"/>
+        <path d="M37 37 L45 17 L52 36 Z" fill="var(--den)"/>
+        <path d="M95 37 L87 17 L80 36 Z" fill="var(--den)"/>
+        <g class="eyes" fill="var(--ink)">
+          <circle cx="52" cy="62" r="6.5"/><circle cx="80" cy="62" r="6.5"/>
+          <circle cx="54" cy="59.5" r="2" fill="#fff"/><circle cx="82" cy="59.5" r="2" fill="#fff"/>
+        </g>
+        <path d="M60 80 L72 80 L66 88 Z" fill="var(--ink)"/>
+        <path d="M66 88 Q66 96 58 96" stroke="var(--ink)" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+        <path d="M66 88 Q66 96 74 96" stroke="var(--ink)" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+      </svg>
+    </div>
+    <div>
+      <h1 class="headline"><small>OFFLINE-FIRST COMPANION</small>Let's wake up your fox.</h1>
+      <p class="sub">Flash the firmware, pick a voice, and tell your fox who it is.
+      Everything works without wifi — the online brain is a bonus you can add.</p>
+    </div>
+  </div>
+
+  <!-- STEP 1: pick a brain pack -->
+  <section class="step">
+    <h2><span class="pip">1</span>Pick a voice &amp; brain</h2>
+    <p class="sub" style="margin-bottom:4px">Both ship on the chip. You can switch
+    later from the fox's own menu, but pick a starting personality.</p>
+    <div class="packs" id="packs">
+      <div class="pack on" data-pack="A">
+        <div class="nm">Chatterbox</div>
+        <div class="vo">clear speech · ~200K brain</div>
+        <p class="ds">Speaks in real words (PicoTTS), tuned a little higher to sound
+        small and cute. The friendlier out-of-the-box choice.</p>
+        <div class="pick">◆ selected</div>
+      </div>
+      <div class="pack" data-pack="B">
+        <div class="nm">Critter</div>
+        <div class="vo">retro synth · ~700K brain</div>
+        <p class="ds">A chirpy formant voice with a bigger on-device brain. More
+        creature than narrator — charming, a touch harder to parse.</p>
+        <div class="pick">◆ selected</div>
+      </div>
+    </div>
+    <p class="hint">Captions show on-screen either way, so you'll always see what
+    the fox says.</p>
+  </section>
+
+  <!-- STEP 2: flash -->
+  <section class="step">
+    <h2><span class="pip">2</span>Flash it over USB</h2>
+    <p class="sub">Plug the AtomS3R in, then hold the button while connecting to
+    enter download mode if it isn't detected. Use Chrome, Edge, or Opera.</p>
+    <div class="row">
+      <esp-web-install-button id="flash" manifest="firmware/manifest.json">
+        <button class="cta" slot="activate">🦊 Flash my fox</button>
+        <span slot="unsupported" class="warn">This browser can't flash — try Chrome or Edge on desktop.</span>
+        <span slot="not-allowed" class="warn">Serial access was blocked.</span>
+      </esp-web-install-button>
+      <span class="hint" style="margin:0">~7&nbsp;MB · about a minute</span>
+    </div>
+    <p class="say" id="packNote">You're flashing the <b>Chatterbox</b> brain.</p>
+  </section>
+
+  <!-- STEP 3: personalise over serial -->
+  <section class="step">
+    <h2><span class="pip">3</span>Tell your fox who it is</h2>
+    <p class="sub">This sends settings straight to the fox over USB. Your wifi
+    password and API key are written only to the device — never uploaded anywhere,
+    never baked into the firmware.</p>
+
+    <div class="grid" style="margin-top:12px">
+      <div><label for="name">Fox's name</label><input id="name" value="Ember" maxlength="16"></div>
+      <div><label for="tz">Time zone (POSIX TZ)</label><input id="tz" value="MST7MDT,M3.2.0,M11.1.0"></div>
+      <div class="full"><label for="pers">Personality</label>
+        <textarea id="pers">playful, curious, warm, a little mischievous</textarea></div>
+      <div><label for="ssid">Wifi network <span class="hint">(optional)</span></label><input id="ssid" placeholder="leave blank for offline"></div>
+      <div><label for="pass">Wifi password</label><input id="pass" type="password"></div>
+      <div><label for="weather">Weather city <span class="hint">(optional)</span></label><input id="weather" placeholder="Denver"></div>
+      <div><label for="volume">Volume</label><input id="volume" type="range" min="0" max="110" value="70"></div>
+      <div class="full"><label for="key">Online brain API key <span class="hint">(optional — Groq free tier works great)</span></label><input id="key" type="password" placeholder="gsk_…"></div>
+      <div><label for="cmodel">Chat model</label><input id="cmodel" value="llama-3.1-8b-instant"></div>
+      <div><label for="abase">API base URL</label><input id="abase" value="https://api.groq.com/openai/v1"></div>
+      <div><label for="mode">Brain mode</label>
+        <select id="mode">
+          <option value="groq">groq (cloud when online)</option>
+          <option value="ondevice">on-device only</option>
+          <option value="hybrid">hybrid (cloud + fallback)</option>
+        </select></div>
+      <div class="full"><label>Fidget tools (turn features on/off)</label>
+        <div class="swatches" style="gap:14px">
+          <label style="font-weight:600"><input type="checkbox" id="t_ble" checked> BLE radar</label>
+          <label style="font-weight:600"><input type="checkbox" id="t_wifi" checked> WiFi radar &amp; sniffer</label>
+          <label style="font-weight:600"><input type="checkbox" id="t_ir" checked> IR blaster</label>
+          <label style="font-weight:600"><input type="checkbox" id="t_imu" checked> IMU games</label>
+          <label style="font-weight:600"><input type="checkbox" id="t_lip" checked> mic lip-sync</label>
+        </div></div>
+      <div class="full"><label>Colour theme</label>
+        <div class="swatches" id="themes"></div></div>
+      <div class="full"><label for="splash">Splash screen text</label>
+        <input id="splash" placeholder="e.g. Ember • booting…" maxlength="20"></div>
+      <div class="full"><label>Splash effect</label>
+        <div class="swatches" id="fx" style="gap:10px"></div></div>
+      <div class="full"><label>Live splash preview</label>
+        <canvas id="splashPreview" width="256" height="256"
+          style="width:200px;height:200px;border-radius:16px;border:1px solid var(--line);image-rendering:pixelated;background:#0f0f1a"></canvas></div>
+      <div class="full"><label>Fur colour</label>
+        <div class="swatches" id="swatches"></div></div>
+    </div>
+
+    <div class="row">
+      <button class="cta" id="send">Send to fox →</button>
+      <button class="cta ghost" id="reconnect">Reconnect USB</button>
+      <span id="status" class="hint" style="margin:0"></span>
+    </div>
+    <p class="say" id="echo">Waiting to meet your fox…</p>
+  </section>
+
+  <footer>
+    Offline-first · your secrets stay on the device · built for AtomS3R + Atomic Echo Base
+  </footer>
+</div>
+
+<script>
+  // ---- pack selection ----
+  let pack = "A";
+  const packNote = document.getElementById('packNote');
+  const flashBtn = document.getElementById('flash');
+  document.querySelectorAll('.pack').forEach(el=>{
+    el.addEventListener('click',()=>{
+      document.querySelectorAll('.pack').forEach(p=>p.classList.remove('on'));
+      el.classList.add('on');
+      pack = el.dataset.pack;
+      const nm = pack==='A' ? 'Chatterbox' : 'Critter';
+      packNote.innerHTML = `You're flashing the <b>${nm}</b> brain.`;
+      // point the installer at the right manifest (CI emits both)
+      flashBtn.manifest = pack==='A' ? 'firmware/manifest.json' : 'firmware/manifest-b.json';
+    });
+  });
+
+  // ---- colour themes (preset palettes; index sent as `theme`) ----
+  const THEMES = [
+    {name:'Den',    pri:'#ff7a3d', acc:'#ffd9a8', bg:'#171227', p:0xFBC7, cbg:0x18C3},
+    {name:'Frost',  pri:'#5ad1ff', acc:'#d8f3ff', bg:'#0a1420', p:0x5EBF, cbg:0x0904},
+    {name:'Slime',  pri:'#57c08a', acc:'#c8ffdf', bg:'#0c1a12', p:0x5E11, cbg:0x08C2},
+    {name:'Berry',  pri:'#c8477e', acc:'#ffd0e6', bg:'#1a0f18', p:0xC24F, cbg:0x1069},
+    {name:'Amber',  pri:'#f2c14e', acc:'#fff0c0', bg:'#1a1608', p:0xF629, cbg:0x18E1},
+    {name:'Mono',   pri:'#d8d8e0', acc:'#ffffff', bg:'#101014', p:0xDEDB, cbg:0x1082},
+  ];
+  let theme = THEMES[0];
+  const tel = document.getElementById('themes');
+  THEMES.forEach((t,i)=>{
+    const d=document.createElement('div');
+    d.className='sw'+(i===0?' on':'');
+    d.title=t.name;
+    d.style.background=`linear-gradient(135deg,${t.pri} 55%,${t.acc} 55%)`;
+    d.onclick=()=>{document.querySelectorAll('#themes .sw').forEach(s=>s.classList.remove('on'));
+      d.classList.add('on'); theme=t; drawSplash();};
+    tel.appendChild(d);
+  });
+
+  // ---- splash effect picker ----
+  const FX=['none','sparkle','wave','rainbow']; let fx=0;
+  const fxel=document.getElementById('fx');
+  FX.forEach((name,i)=>{
+    const b=document.createElement('button');
+    b.type='button'; b.className='cta ghost'; b.textContent=name;
+    b.style.padding='6px 12px'; b.style.fontSize='13px';
+    if(i===0) b.style.borderColor=getComputedStyle(document.documentElement).getPropertyValue('--fur');
+    b.onclick=()=>{fx=i; [...fxel.children].forEach(c=>c.style.borderColor='');
+      b.style.borderColor='var(--fur)'; drawSplash();};
+    fxel.appendChild(b);
+  });
+
+  // ---- live splash preview (mirrors the firmware's face_splash) ----
+  const pv=document.getElementById('splashPreview'); const px=pv.getContext('2d');
+  let pvFrame=0;
+  function drawSplash(){
+    const s=256, sc=2; // 128 logical → 256px
+    px.fillStyle=theme.bg; px.fillRect(0,0,s,s);
+    // effect
+    if(fx===1){ for(let i=0;i<40;i++){px.fillStyle=Math.random()<.5?theme.acc:'#fff';
+      px.fillRect(Math.random()*s,Math.random()*s,2,2);} }
+    else if(fx===2){ px.strokeStyle=theme.acc; px.beginPath();
+      for(let x=0;x<s;x++){const y=s/2+40*Math.sin(x*0.05+pvFrame*0.2); if(x===0)px.moveTo(x,y);else px.lineTo(x,y);} px.stroke(); }
+    else if(fx===3){ for(let y=0;y<s;y+=8){px.fillStyle=`hsl(${(y+pvFrame*8)%360},70%,55%)`;px.globalAlpha=.35;px.fillRect(0,y,s,8);} px.globalAlpha=1; }
+    // fox head
+    const cx=s/2;
+    px.fillStyle=theme.pri;
+    px.beginPath();px.moveTo(76,68);px.lineTo(100,16);px.lineTo(124,64);px.closePath();px.fill();
+    px.beginPath();px.moveTo(180,68);px.lineTo(156,16);px.lineTo(132,64);px.closePath();px.fill();
+    px.beginPath();px.ellipse(cx,92,60,52,0,0,7);px.fill();
+    px.fillStyle=theme.acc;px.beginPath();px.ellipse(cx,108,36,26,0,0,7);px.fill();
+    px.fillStyle='#000';px.beginPath();px.arc(110,88,6,0,7);px.arc(146,88,6,0,7);px.fill();
+    px.beginPath();px.moveTo(120,104);px.lineTo(136,104);px.lineTo(128,114);px.closePath();px.fill();
+    // text
+    px.fillStyle='#fff';px.font='bold 18px Nunito, sans-serif';px.textAlign='center';
+    const txt=(document.getElementById('splash').value||('hi, i\'m '+(val('name')||'Ember')));
+    px.fillText(txt.slice(0,20),cx,236);
+  }
+  document.getElementById('splash').addEventListener('input',drawSplash);
+  document.getElementById('name')?.addEventListener('input',drawSplash);
+  setInterval(()=>{pvFrame++; if(fx>0) drawSplash();},80);
+
+  // ---- fur colour swatches (rgb565 sent to device) ----
+  const FURS = [
+    {hex:'#ff7a3d', p:0xFBC7}, {hex:'#e85f22', p:0xE304},
+    {hex:'#c8477e', p:0xC24F}, {hex:'#57c08a', p:0x5E11},
+    {hex:'#7a6cff', p:0x7B7F}, {hex:'#f2c14e', p:0xF629},
+  ];
+  let fur = FURS[0];
+  const sw = document.getElementById('swatches');
+  FURS.forEach((f,i)=>{
+    const d=document.createElement('div');
+    d.className='sw'+(i===0?' on':''); d.style.background=f.hex;
+    d.title=f.hex;
+    d.onclick=()=>{document.querySelectorAll('.sw').forEach(s=>s.classList.remove('on'));
+      d.classList.add('on'); fur=f;};
+    sw.appendChild(d);
+  });
+
+  // ---- USB serial config ----
+  let port=null, writer=null;
+  const status=document.getElementById('status');
+  const echo=document.getElementById('echo');
+
+  async function connect(){
+    if(!('serial' in navigator)){ status.innerHTML='<span class="warn">Web Serial needs Chrome/Edge desktop.</span>'; return false; }
+    try{
+      port = await navigator.serial.requestPort();
+      await port.open({baudRate:115200});
+      writer = port.writable.getWriter();
+      readLoop();
+      status.innerHTML='<span class="ok">connected ✓</span>';
+      return true;
+    }catch(e){ status.innerHTML='<span class="warn">'+e.message+'</span>'; return false; }
+  }
+
+  async function readLoop(){
+    const dec=new TextDecoderStream();
+    port.readable.pipeTo(dec.writable);
+    const reader=dec.readable.getReader();
+    let buf='';
+    for(;;){
+      const {value,done}=await reader.read();
+      if(done) break;
+      buf+=value;
+      let nl;
+      while((nl=buf.indexOf('\n'))>=0){
+        const line=buf.slice(0,nl).trim(); buf=buf.slice(nl+1);
+        if(line==='FOX_CONFIG_OK'){ echo.innerHTML='<span class="ok">Your fox has its new identity. Say hi! 🦊</span>'; }
+        else if(line) echo.textContent = line;
+      }
+    }
+  }
+
+  document.getElementById('reconnect').onclick=connect;
+
+  document.getElementById('send').onclick=async()=>{
+    if(!writer && !(await connect())) return;
+    const cfg={
+      name:val('name'), tz:val('tz'), personality:val('pers'),
+      ssid:val('ssid'), pass:val('pass'), weather:val('weather'),
+      key:val('key'), chat_model:val('cmodel'), api_base:val('abase'),
+      mode:document.getElementById('mode').value,
+      voice: pack==='A' ? 'chatterbox' : 'critter',
+      volume:parseInt(val('volume'),10),
+      splash: document.getElementById('splash').value,
+      splash_fx: fx,
+      theme: THEMES.indexOf(theme),
+      tool_ble:  document.getElementById('t_ble').checked,
+      tool_wifi: document.getElementById('t_wifi').checked,
+      tool_ir:   document.getElementById('t_ir').checked,
+      tool_imu:  document.getElementById('t_imu').checked,
+      lip_sync:  document.getElementById('t_lip').checked,
+      cpri: fur.p, cacc:0xFED4, cbg: theme.cbg
+    };
+    const line=JSON.stringify(cfg)+'\n';
+    await writer.write(new TextEncoder().encode(line));
+    status.innerHTML='<span class="ok">sent ✓</span>';
+    echo.textContent='…fox is thinking about its new name…';
+  };
+
+  const val=id=>document.getElementById(id).value.trim();
+</script>
+</body>
+</html>

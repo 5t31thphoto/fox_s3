@@ -1,0 +1,34 @@
+## Managed component dependencies.
+##
+## NOTE ON THE PREVIOUS BUILD FAILURE:
+## The earlier manifest listed two things that are NOT in the ESP Component
+## Registry as versioned packages, so `idf.py build` failed at dependency
+## solving:
+##   - h2zero/esp-nimble-cpp  -> removed. Nothing here uses NimBLE's C++ API
+##     directly; BLE comes from the Arduino core's BLEDevice.h, which the
+##     arduino-esp32 component already provides.
+##   - jmattsson/esp-picotts  -> it's a GitHub repo, not a registry package, so
+##     it can't be requested by "name: ^version". It's declared below as an
+##     OPTIONAL git dependency. The voice code (fox_voice.cpp) is wrapped in
+##     `#if __has_include("picotts.h")`, so the firmware still builds and speaks
+##     (SAM "critter" voice + babble) even if this line is removed or the repo
+##     is unreachable.
+dependencies:
+  idf: ">=5.1"
+  # Core display/audio/IMU HAL. M5GFX comes in transitively but we pin it too.
+  m5stack/m5unified: "^0.2.5"
+  m5stack/m5gfx: "^0.2.5"
+  # Offline speech recognition (MultiNet7 + AFE).
+  espressif/esp-sr: "^2.0.0"
+  # Arduino core as an IDF component (provides WiFi/BLE/HTTPClient/Preferences).
+  espressif/arduino-esp32: "^3.0.0"
+  # JSON for cloud chat/transcription payloads and USB config parsing.
+  bblanchon/arduinojson: "^7.0.0"
+
+  ## OPTIONAL: PicoTTS "chatterbox" voice. Uncomment to include it. Because it's
+  ## a git source (not a registry version), it does NOT go through version
+  ## solving and cannot cause the "doesn't match any versions" error again. If
+  ## the checkout fails for any reason, remove this block — the build stays green
+  ## and the fox uses the SAM "critter" voice instead.
+  # esp-picotts:
+  #   git: https://github.com/jmattsson/esp-picotts.git

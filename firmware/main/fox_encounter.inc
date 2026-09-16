@@ -7,11 +7,6 @@ extern M5Canvas* face_canvas;
 extern FoxConfig cfg;
 extern FoxNeeds needs;
 extern bool g_goto_menu;
-void speak(const String&);
-static void tilt_xy(float* rx, float* ry);
-static bool wants_menu();
-void face_draw(FoxMood mood);
-void face_set_mouth(float);
 
 // ===========================================================================
 //  FOX ENCOUNTERS — short, warm interactions with the fox itself.

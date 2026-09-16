@@ -6,9 +6,6 @@
 
 extern M5Canvas* face_canvas;
 extern FoxConfig cfg;
-void speak(const String&);
-static void tilt_xy(float* rx, float* ry);   // from fox_games.inc
-static bool wants_menu();                     // from fox_input.inc
 
 // small helper: HSV->rgb565 for smooth colour cycling
 static uint16_t hsv565(float h, float s, float v) {

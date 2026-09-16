@@ -8,7 +8,6 @@
 #include <ArduinoJson.h>
 
 extern FoxConfig cfg;
-bool wifi_connect();
 
 // ---- ordinary weather (wttr.in) --------------------------------------------
 String net_weather() {

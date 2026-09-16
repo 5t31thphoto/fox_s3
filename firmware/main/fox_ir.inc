@@ -33,7 +33,7 @@ static const IrEntry* ir_table = nullptr;
 static rmt_channel_handle_t ir_chan = nullptr;
 static rmt_encoder_handle_t ir_encoder = nullptr;
 
-static void ir_begin() {
+void ir_begin() {
     const esp_partition_t* p = esp_partition_find_first(
         ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, "foxdata");
     if (p) {
@@ -62,7 +62,7 @@ static void ir_begin() {
     Serial.printf("FOX: IR ready, %u codes\n", ir_n_codes);
 }
 
-static const char* ir_name(const IrEntry* e) {
+__attribute__((unused)) static const char* ir_name(const IrEntry* e) {
     return ir_base ? (const char*)(ir_base + e->name_off) : "";
 }
 
@@ -92,7 +92,6 @@ static void ir_play(const IrEntry* e) {
 
 // Direct command: send the user's saved code for (category, button) if known,
 // else (for power) fall into the narrowing flow.
-void speak(const String&);   // fwd from fox_main
 static int ir_saved_index(const char* category, const char* button);
 
 void ir_command(const char* category, const char* button) {
@@ -134,7 +133,6 @@ static void ir_save_index(const char* category, const char* button, int idx) {
 // play the first half, ask "that one?" If yes keep that half, else the other,
 // until one code remains. Confirmation comes from the USER button (tap = yes)
 // within a short window, which we poll here.
-extern bool input_wait_yes(uint32_t ms);   // from fox_input.inc
 
 void ir_narrow_power() {
     if (!ir_table || !ir_n_codes) { speak("i don't have any tv codes"); return; }

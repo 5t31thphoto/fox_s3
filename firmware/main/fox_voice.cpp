@@ -12,6 +12,7 @@
 // with copy=false would read freed data. We copy every chunk into a small
 // PSRAM ring and play copies. That was a real garble bug in the prior core.
 #include "fox.h"
+#include "fox_decls.h"
 #include <esp_heap_caps.h>
 
 #if __has_include("picotts.h")
@@ -21,12 +22,7 @@
 #define HAVE_PICO 0
 #endif
 
-extern "C" {
-// SAM tiny synth (fox_sam.c). Renders 8-bit unsigned mono ~22050 Hz into buf.
-int  sam_render(const char* text, uint8_t speed, uint8_t pitch,
-                uint8_t throat, uint8_t mouth, uint8_t** out, int* out_len);
-void sam_free(uint8_t* p);
-}
+// (sam_render / sam_free are declared in fox_decls.h)
 
 static FoxConfig g_cfg;
 static bool g_pico_ok = false;
@@ -39,12 +35,10 @@ void voice_begin(const FoxConfig& cfg) {
 bool voice_is_pico() { return g_pico_ok; }
 
 // forward from fox_face.inc — lets the talking path drive the mouth + redraw.
-void  face_set_mouth(float level01);
-void  face_draw(FoxMood mood);
 
 // Drive the mouth from a slice of PCM (any bit depth) while the fox speaks, so
 // the avatar actually lip-syncs to its OWN voice, not just the mic.
-static void mouth_from_pcm16(const int16_t* s, size_t n, FoxMood mood) {
+__attribute__((unused)) static void mouth_from_pcm16(const int16_t* s, size_t n, FoxMood mood) {
     if (!s || !n) return;
     uint32_t acc = 0;
     for (size_t i = 0; i < n; ++i) acc += abs(s[i]);

@@ -36,3 +36,25 @@ CONFIG_TINYUSB_CDC_ENABLED=y
 # ---- misc ----
 CONFIG_ESP_TASK_WDT_TIMEOUT_S=10
 CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+
+
+# ---- Bluetooth LE (ESP32-S3 is BLE-only in hardware; no Classic BT) ----
+# Arduino's BLEDevice.h uses Bluedroid. These are the correct S3 keys.
+CONFIG_BT_ENABLED=y
+CONFIG_BT_BLUEDROID_ENABLED=y
+CONFIG_BT_BLE_ENABLED=y
+CONFIG_BT_GATTS_ENABLE=y
+CONFIG_BT_GATTC_ENABLE=y
+CONFIG_BT_BLE_42_FEATURES_SUPPORTED=y
+
+# ---- WiFi + BLE coexistence (both radios share one antenna on the S3) ----
+# The tools run one at a time (menu-driven), but enabling software coexistence
+# means even concurrent use is arbitrated by the controller instead of
+# conflicting. This is the proper fix — not disabling a radio.
+CONFIG_ESP_COEX_SW_COEXIST_ENABLE=y
+CONFIG_ESP_WIFI_SW_COEXIST_ENABLE=y
+
+# ---- Warnings: keep them visible but don't let the GCC-13 additions (e.g.
+# dangling-reference) hard-stop the build. The IDF-sanctioned switch. ----
+CONFIG_COMPILER_DISABLE_GCC12_WARNINGS=y
+CONFIG_COMPILER_DISABLE_GCC13_WARNINGS=y

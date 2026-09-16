@@ -6,13 +6,11 @@
 // Voice can launch any of these; the fox narrates the result.
 #pragma once
 
-void speak(const String&);
 extern M5Canvas* face_canvas;
 extern FoxConfig cfg;
-static float imu_heading_deg();   // from fox_tools.inc
 
 // small tilt reader: returns roll/pitch in ~[-1,1]
-static void tilt_xy(float* rx, float* ry) {
+void tilt_xy(float* rx, float* ry) {
     float ax, ay, az;
     M5.Imu.getAccel(&ax, &ay, &az);
     *rx = constrain(ay, -1.f, 1.f);
@@ -117,7 +115,6 @@ void game_catch() {
 //  (20 QUESTIONS lives in fox_bayes.inc — a Bayesian guesser that beats a fixed
 //   tree: it updates beliefs and asks the most informative question each turn.)
 // ===========================================================================
-extern bool input_wait_yes(uint32_t ms);   // tap = yes
 
 // ===========================================================================
 //  REACTION — wait for the flash, then tap. Measures your reflex.

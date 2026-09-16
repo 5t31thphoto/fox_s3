@@ -4,20 +4,19 @@
 #include <esp_sleep.h>
 #include <driver/gpio.h>
 
-enum ButtonEvent { BTN_NONE, BTN_TAP, BTN_HOLD_START };
-enum Gesture     { GST_NONE, GST_TAP, GST_SHAKE, GST_TILT };
+// (ButtonEvent and Gesture enums are declared in fox_decls.h)
 
 static uint32_t btn_down_at = 0;
 static bool     btn_was_down = false;
 
-static void input_begin() {
+void input_begin() {
     pinMode((int)USER_GPIO, INPUT_PULLUP);
     M5.Imu.begin();
 }
 
 // Distinguish a quick tap (open menu) from a hold (push-to-talk). We report
 // HOLD_START as soon as the press passes PTT_MIN so capture can begin live.
-static ButtonEvent input_button_event() {
+ButtonEvent input_button_event() {
     bool down = digitalRead((int)USER_GPIO) == LOW;
     uint32_t now = millis();
     if (down && !btn_was_down) { btn_down_at = now; btn_was_down = true; }
@@ -37,7 +36,7 @@ static bool button_is_down() { return digitalRead((int)USER_GPIO) == LOW; }
 // Double-click anywhere (including inside a game/tool loop) should jump to the
 // menu. Games poll this each frame and return early when it fires; the main
 // loop then opens the menu. Returns true once per double-click.
-static bool wants_menu() {
+bool wants_menu() {
     return M5.BtnA.wasDoubleClicked();
 }
 
@@ -59,7 +58,7 @@ bool input_wait_yes(uint32_t ms) {
 // ---- microphone capture -----------------------------------------------------
 // Capture while the USER button is held. Returns a PSRAM buffer of int16 mono
 // @16k; caller frees. Also drives the mouth from live level for lip-sync.
-static int16_t* capture_while_held(size_t* out_n) {
+int16_t* capture_while_held(size_t* out_n) {
     size_t cap = SAMPLE_RATE * (PTT_MAX_MS / 1000) + SAMPLE_RATE;
     int16_t* buf = (int16_t*)heap_caps_malloc(cap * sizeof(int16_t),
                                               MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -84,7 +83,7 @@ static int16_t* capture_while_held(size_t* out_n) {
 
 // Capture a single utterance using level-gated VAD, ending after trailing
 // silence or when `timeout_ms` elapses with no speech. Used in conversation mode.
-static int16_t* capture_vad_burst(size_t* out_n, uint32_t timeout_ms) {
+int16_t* capture_vad_burst(size_t* out_n, uint32_t timeout_ms) {
     size_t cap = SAMPLE_RATE * 12;
     int16_t* buf = (int16_t*)heap_caps_malloc(cap * sizeof(int16_t),
                                               MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -113,7 +112,7 @@ static int16_t* capture_vad_burst(size_t* out_n, uint32_t timeout_ms) {
 }
 
 // ---- IMU gestures -----------------------------------------------------------
-static Gesture input_gesture() {
+Gesture input_gesture() {
     float ax, ay, az;
     if (!M5.Imu.getAccel(&ax, &ay, &az)) return GST_NONE;
     float mag = sqrtf(ax*ax + ay*ay + az*az);
@@ -213,9 +212,6 @@ static const MenuItem MENU[] = {
 };
 static const int MENU_N = sizeof(MENU) / sizeof(MENU[0]);
 
-void speak(const String&);
-void ir_narrow_power();
-void menu_dispatch(const char* id);   // implemented in fox_main.cpp
 
 static void menu_render(int sel) {
     face_canvas->fillSprite(face_cfg->color_bg);
@@ -309,7 +305,7 @@ static void apply_config_json(const String& js) {
     speak(String("thanks! i'm ") + cfg.name + " now~");
 }
 
-static void input_poll() {
+void input_poll() {
     while (Serial.available()) {
         char c = (char)Serial.read();
         if (c == '\n') { apply_config_json(serial_line); serial_line = ""; }

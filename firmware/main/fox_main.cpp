@@ -20,6 +20,7 @@
 // Seven concrete bugs from the previous core are fixed here; each is called out
 // with a "// FIX:" comment where it lives.
 #include "fox.h"
+#include "fox_decls.h"
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
@@ -33,8 +34,10 @@
 // esp-sr (offline speech)
 #include <esp_mn_iface.h>
 #include <esp_afe_sr_iface.h>
+#include <esp_afe_sr_models.h>       // esp_afe_handle_from_config()
 #include <esp_afe_config.h>
 #include <esp_mn_models.h>
+#include <esp_mn_speech_commands.h>  // esp_mn_commands_alloc/clear/add/update()
 #include <esp_process_sdkconfig.h>
 #include <model_path.h>
 
@@ -80,7 +83,7 @@ static void load_config() {
     cfg.cloud_enabled = cfg.api_key.length() > 0;
 }
 
-static void save_config() {
+void save_config() {
     prefs.begin("fox", false);
     prefs.putString("name", cfg.name);
     prefs.putString("tz", cfg.timezone);
@@ -233,7 +236,7 @@ static int recognize_offline(int16_t* audio, size_t samples) {
 // ============================================================================
 //  Cloud (optional). OpenAI-compatible chat + Whisper transcription.
 // ============================================================================
-static bool wifi_connect() {
+bool wifi_connect() {
     if (WiFi.status() == WL_CONNECTED) return true;
     if (cfg.wifi_ssid.isEmpty()) return false;
     WiFi.mode(WIFI_STA);
@@ -259,8 +262,6 @@ static String fox_system_prompt() {
 // Run a named tool and return a short text/JSON report the model can read.
 // These mirror the original llm_client.c tool surface (ble/wifi/ir/imu) and add
 // the space-weather report. Report-only: no long-running UI here.
-const char* tool_ble_scan_report();
-const char* tool_wifi_scan_report();
 static String run_tool(const String& name, JsonVariantConst args) {
     if (name == "ble_scan")   return String(tool_ble_scan_report());
     if (name == "wifi_scan")  return String(tool_wifi_scan_report());
@@ -328,12 +329,16 @@ static String cloud_chat(const String& user_text) {
             // echo the assistant turn (with tool_calls) into the conversation
             JsonObject a = msgs.add<JsonObject>();
             a["role"] = "assistant";
-            a["content"] = choice["content"].isNull() ? "" : choice["content"];
+            if (choice["content"].isNull()) a["content"] = "";
+            else a["content"] = choice["content"].as<String>();
             a["tool_calls"] = choice["tool_calls"];
-            for (JsonObject call : choice["tool_calls"].as<JsonArray>()) {
+            JsonArray calls = choice["tool_calls"].as<JsonArray>();   // avoid dangling temp
+            for (JsonObject call : calls) {
                 String fname = call["function"]["name"].as<String>();
+                String argstr = call["function"]["arguments"].as<String>();
+                if (argstr.length() == 0) argstr = "{}";
                 JsonDocument args;
-                deserializeJson(args, call["function"]["arguments"].as<String>() | "{}");
+                deserializeJson(args, argstr);
                 String result = run_tool(fname, args.as<JsonVariantConst>());
                 JsonObject tr = msgs.add<JsonObject>();
                 tr["role"] = "tool";

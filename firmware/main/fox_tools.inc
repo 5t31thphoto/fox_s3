@@ -9,20 +9,19 @@
 // Everything is drawn on the 128x128 LCD via the shared face canvas.
 #pragma once
 #include <WiFi.h>
+#include <esp_wifi.h>
 #include <BLEDevice.h>
 #include <BLEScan.h>
 #include <BLEAdvertisedDevice.h>
-#include <esp_wifi.h>
 
 // forward decls from other units
-void speak(const String&);
 extern M5Canvas* face_canvas;
 extern FoxConfig cfg;
 
 // ---------------------------------------------------------------------------
 //  Small helpers for the radar/scope screens
 // ---------------------------------------------------------------------------
-static float imu_heading_deg() {
+float imu_heading_deg() {
     // Use magnetometer if available for absolute bearing; fall back to the
     // gyro-integrated yaw. The AtomS3R has a BMM150 magnetometer.
     float mx, my, mz;
@@ -85,7 +84,8 @@ static void radar_draw(float heading, int count, bool wifi) {
     for (int i = 0; i < blip_n; ++i) {
         float br = (blips[i].bearing - 90) * PI / 180.0f;
         float rr = R * (1.0f - (min(0, blips[i].rssi + 30) / -70.0f));  // -30dBm→edge
-        if (rr > R) rr = R; if (rr < 6) rr = 6;
+        if (rr > R) rr = R;
+        if (rr < 6) rr = 6;
         int x = cx + rr * cosf(br), y = cy + rr * sinf(br);
         uint16_t col = (millis() - blips[i].seen < 1500) ? fur : 0x8410;
         face_canvas->fillCircle(x, y, 3, col);
@@ -194,12 +194,12 @@ const char* tool_wifi_scan_report() {
 //  transmits nothing and it PERSISTS nothing: every count is in RAM and resets
 //  on reboot, exactly as asked.
 // ===========================================================================
-static volatile uint32_t sniff_mgmt = 0, sniff_data = 0, sniff_ctrl = 0;
+static uint32_t sniff_mgmt = 0, sniff_data = 0, sniff_ctrl = 0;
 // pwnagotchi-ish tallies (RAM only, never saved)
-static volatile uint32_t pwn_open_beacons = 0;   // beacons advertising no crypto
-static volatile uint32_t pwn_eapol = 0;          // EAPOL (handshake) frames seen
-static volatile uint32_t pwn_pmkid = 0;          // EAPOL msg1 carrying PMKID
-static volatile uint32_t pwn_probes = 0;         // probe requests (devices looking)
+static uint32_t pwn_open_beacons = 0;   // beacons advertising no crypto
+static uint32_t pwn_eapol = 0;          // EAPOL (handshake) frames seen
+static uint32_t pwn_pmkid = 0;          // EAPOL msg1 carrying PMKID
+static uint32_t pwn_probes = 0;         // probe requests (devices looking)
 static uint32_t pwn_score = 0, pwn_level = 1;
 
 static inline uint16_t le16(const uint8_t* p) { return p[0] | (p[1] << 8); }
@@ -269,7 +269,7 @@ void tool_menu_sniffer() {
     esp_wifi_set_promiscuous(true);
     esp_wifi_set_promiscuous_rx_cb(&sniffer_cb);
     int ch = 1;
-    uint32_t t0 = millis(), last = 0;
+    uint32_t last = 0;
     while (true) {
         M5.update();
         if (M5.BtnA.wasClicked() || M5.BtnA.wasDoubleClicked()) break;

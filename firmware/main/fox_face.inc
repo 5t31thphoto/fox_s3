@@ -13,7 +13,7 @@ static String caption;
 static uint32_t caption_until = 0;
 static uint8_t ear_wiggle = 0;
 
-static void face_begin(FoxConfig& c) {
+void face_begin(FoxConfig& c) {
     face_cfg = &c;
     M5.Display.setColorDepth(16);
     M5.Display.setBrightness(90);
@@ -22,12 +22,12 @@ static void face_begin(FoxConfig& c) {
     face_canvas->setTextDatum(middle_center);
 }
 
-static void face_wake() { M5.Display.setBrightness(90); }
-static void face_dim()  { M5.Display.setBrightness(20); }
+void face_wake() { M5.Display.setBrightness(90); }
+void face_dim()  { M5.Display.setBrightness(20); }
 
 // Custom boot splash: a fox graphic + the user's text, with an optional effect
 // (sparkle / wave / rainbow) configured from the web flasher. Runs ~2.5s.
-static void face_splash(FoxConfig& c) {
+void face_splash(FoxConfig& c) {
     uint16_t bg = c.color_bg, fur = c.color_primary, acc = c.color_accent;
     String txt = c.splash_text.length() ? c.splash_text : (String("hi, i'm ") + c.name);
     uint32_t t0 = millis();
@@ -139,7 +139,7 @@ void face_draw(FoxMood mood) {
 }
 
 // Called every loop to animate idle motion (blink, ear wiggle).
-static void face_tick(FoxMood mood) {
+void face_tick(FoxMood mood) {
     if (++blink_timer > 220) { blinking = true; }
     if (blink_timer > 230)   { blinking = false; blink_timer = 0; }
     if ((blink_timer & 7) == 0) ear_wiggle++;
@@ -148,17 +148,18 @@ static void face_tick(FoxMood mood) {
     face_draw(mood);
 }
 
-static void face_caption(const String& text) {
+void face_caption(const String& text) {
     caption = text;
     caption_until = millis() + 4000;
 }
 
-static void face_listen() { face_caption("*listening*"); }
-static void face_think()  { face_caption("*thinking*"); }
+void face_listen() { face_caption("*listening*"); }
+void face_think()  { face_caption("*thinking*"); }
 
 // The speaker path and mic path both poke this to drive the mouth.
 void face_set_mouth(float level01) {
-    if (level01 < 0) level01 = 0; if (level01 > 1) level01 = 1;
+    if (level01 < 0) level01 = 0;
+    if (level01 > 1) level01 = 1;
     mouth_open = level01;
 }
 
@@ -180,7 +181,7 @@ static void face_lipsync_from_mic_once() {
     uint64_t level = 0;
     if (M5.Mic.record(s_wave, WAVE, SAMPLE_RATE)) {
         s_fft.exec(s_wave);
-        for (size_t bx = 5; bx <= 60; ++bx) level += abs(s_fft.get(bx));
+        for (size_t bx = 5; bx <= 60; ++bx) { int32_t f = s_fft.get(bx); level += (f < 0 ? -f : f); }
     }
     uint32_t tl = level >> 11;                    // shift → mouth scale
     float ratio = (float)tl / s_lip_max;

@@ -12,8 +12,6 @@
 // P(feature|entity) as bytes (0..100). No heap, no float tables in flash.
 #pragma once
 
-void speak(const String&);
-extern bool input_wait_yes(uint32_t ms);   // tap = yes
 
 namespace bayes20 {
 

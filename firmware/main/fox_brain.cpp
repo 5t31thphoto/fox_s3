@@ -10,6 +10,7 @@
 // fact the firmware already computed. It cannot invent facts. If it is absent
 // or unsure, these templates are the voice of the fox.
 #include "fox.h"
+#include "fox_decls.h"
 #include <esp_random.h>
 
 // forward decl from fox_llm.cpp (weak — may be a stub that returns "")

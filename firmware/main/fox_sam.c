@@ -97,7 +97,8 @@ int sam_render(const char* text, uint8_t speed, uint8_t pitch,
             else if (s > dur_samples - atk) env = (float)(dur_samples - s) / atk;
             val *= env;
             int sample = (int)(128 + val * 110);
-            if (sample < 0) sample = 0; if (sample > 255) sample = 255;
+            if (sample < 0) sample = 0;
+            if (sample > 255) sample = 255;
             buf[pos] = (uint8_t)sample;
         }
     }

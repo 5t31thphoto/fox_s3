@@ -16,6 +16,7 @@
 // returns "" and the personality templates carry the whole load. The device is
 // fully functional either way.
 #include "fox.h"
+#include "fox_decls.h"
 #include <esp_partition.h>
 #include <esp_heap_caps.h>
 #include <math.h>

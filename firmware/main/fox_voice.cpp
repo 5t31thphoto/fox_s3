@@ -166,12 +166,18 @@ void voice_say(const String& text, FoxMood mood) {
 #if HAVE_PICO
         spoke = pico_say(text);
 #endif
+        // PicoTTS isn't compiled into this build, so "chatterbox" would otherwise
+        // just chirp. Fall back to SAM so the fox actually speaks words. (Enable
+        // the esp-picotts component to get the real Pico voice.)
+        if (!spoke) spoke = sam_say(text);
     } else if (g_cfg.voice_pack == "critter") {
+        spoke = sam_say(text);
+    } else {
         spoke = sam_say(text);
     }
     if (!spoke) {
-        // Missing pack or engine failure: chirp the line so the fox never goes
-        // mute and never pretends words were spoken that weren't.
+        // Last resort: chirp the line so the fox is never mute and never
+        // pretends words were spoken that weren't.
         voice_babble(mood, syllable_estimate(text));
     }
 }

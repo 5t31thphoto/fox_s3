@@ -6,6 +6,16 @@ on:
   workflow_dispatch:
   pull_request:
 
+# Pages deploy needs these; concurrency avoids overlapping deploys.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
 # Build the universal firmware plus both swappable brain packs and the IR
 # library, then publish a merged flashable image + esp-web-tools manifest so the
 # web page can flash without a toolchain. Secrets are NEVER involved: the fox is
@@ -116,60 +126,82 @@ jobs:
           target: esp32s3
           path: firmware
 
-      - name: Assemble flashable images
+      - name: Assemble flashable images (authoritative offsets from IDF)
         run: |
+          set -e
           mkdir -p dist
           cd firmware/build
-          # Core app + bootloader + partition table.
+          # flasher_args.json is IDF's own source of truth: exact file->offset
+          # for bootloader, partition-table, app, AND the esp-sr model image.
+          echo "flasher_args.json flash_files:"
+          python3 - <<'PY'
+          import json
+          d=json.load(open("flasher_args.json"))
+          for off,f in sorted(d["flash_files"].items(), key=lambda x:int(x[0],16)):
+              print(f"  {off}  {f}")
+          PY
+          # Copy the standard images.
           cp bootloader/bootloader.bin partition_table/partition-table.bin fox.bin ../../dist/
-          # Data partitions the web tool flashes at their partition offsets.
-          cp ../main/data/fox_ir.bin      ../../dist/foxdata.bin
-          cp ../main/data/foxbrainA.bin   ../../dist/foxbrainA.bin
-          cp ../main/data/foxbrainB.bin   ../../dist/foxbrainB.bin
+          cp ../main/data/fox_ir.bin    ../../dist/foxdata.bin
+          cp ../main/data/foxbrainA.bin ../../dist/foxbrainA.bin
+          cp ../main/data/foxbrainB.bin ../../dist/foxbrainB.bin
+          # The esp-sr model image: take its path+offset straight from IDF.
+          model_path=$(python3 -c "import json;d=json.load(open('flasher_args.json'));print([f for o,f in d['flash_files'].items() if 'srmodels' in f or 'model' in f.lower()][0])")
+          echo "model image path (from IDF): $model_path"
+          cp "$model_path" ../../dist/srmodels.bin
+          test -s ../../dist/srmodels.bin || { echo "::error::srmodels.bin is empty/missing — offline speech would brick a web flash. Failing build."; exit 1; }
+          echo "srmodels.bin size: $(stat -c%s ../../dist/srmodels.bin) bytes"
+          # Export the exact offsets IDF used, so the manifest can't drift from
+          # the partition table.
+          python3 - <<'PY' > offsets.env
+          import json
+          d=json.load(open("flasher_args.json"))
+          def off_for(sub):
+              for o,f in d["flash_files"].items():
+                  if sub in f: return int(o,16)
+              return None
+          app=off_for("fox.bin"); model=off_for("srmodels")
+          print(f"APP_OFFSET={app}")
+          print(f"MODEL_OFFSET={model}")
+          PY
+          cat offsets.env
+          cp offsets.env ../../dist/offsets.env
           cd ../../dist
           sha256sum * > SHA256SUMS
 
-      - name: Emit esp-web-tools manifest
+      - name: Emit esp-web-tools manifests (offsets from IDF, brain from partition table)
         run: |
-          cat > dist/manifest.json <<'JSON'
+          set -e
+          cd dist
+          . offsets.env
+          # foxbrain/foxdata offsets come from partitions.csv (data partitions IDF
+          # doesn't flash): keep these two in sync with partitions.csv.
+          FOXBRAIN_OFFSET=$((16#6c0000))
+          FOXDATA_OFFSET=$((16#7a0000))
+          gen() {  # $1 = brain bin, $2 = out manifest
+            cat > "$2" <<JSON
           {
             "name": "Fox Voice Companion",
             "version": "1.0.0",
             "new_install_prompt_erase": true,
-            "builds": [
-              {
-                "chipFamily": "ESP32-S3",
-                "parts": [
-                  { "path": "bootloader.bin",        "offset": 0 },
-                  { "path": "partition-table.bin",   "offset": 32768 },
-                  { "path": "fox.bin",               "offset": 131072 },
-                  { "path": "foxbrainA.bin",         "offset": 6488064 },
-                  { "path": "foxdata.bin",           "offset": 7536640 }
-                ]
-              }
-            ]
+            "builds": [{
+              "chipFamily": "ESP32-S3",
+              "parts": [
+                { "path": "bootloader.bin",      "offset": 0 },
+                { "path": "partition-table.bin", "offset": 32768 },
+                { "path": "fox.bin",             "offset": ${APP_OFFSET} },
+                { "path": "srmodels.bin",        "offset": ${MODEL_OFFSET} },
+                { "path": "$1",                  "offset": ${FOXBRAIN_OFFSET} },
+                { "path": "foxdata.bin",         "offset": ${FOXDATA_OFFSET} }
+              ]
+            }]
           }
           JSON
-          # Pack B manifest: identical except the foxbrain part points at pack B.
-          cat > dist/manifest-b.json <<'JSON'
-          {
-            "name": "Fox Voice Companion (Critter brain)",
-            "version": "1.0.0",
-            "new_install_prompt_erase": true,
-            "builds": [
-              {
-                "chipFamily": "ESP32-S3",
-                "parts": [
-                  { "path": "bootloader.bin",        "offset": 0 },
-                  { "path": "partition-table.bin",   "offset": 32768 },
-                  { "path": "fox.bin",               "offset": 131072 },
-                  { "path": "foxbrainB.bin",         "offset": 6488064 },
-                  { "path": "foxdata.bin",           "offset": 7536640 }
-                ]
-              }
-            ]
           }
-          JSON
+          gen foxbrainA.bin manifest.json
+          gen foxbrainB.bin manifest-b.json
+          echo "=== manifest.json ==="; cat manifest.json
+          echo "=== offsets used: app=$APP_OFFSET model=$MODEL_OFFSET brain=$FOXBRAIN_OFFSET foxdata=$FOXDATA_OFFSET ==="
 
       - uses: actions/upload-artifact@v4
         with:
@@ -182,6 +214,10 @@ jobs:
           mkdir -p site
           cp -r web/* site/
           cp -r dist site/firmware
+          # index.html (the flasher) is now the site root. .nojekyll stops
+          # GitHub from running Jekyll on it (which can hide files/underscores).
+          touch site/.nojekyll
+          echo "Site root contents:"; ls -la site
       - uses: actions/upload-pages-artifact@v3
         if: github.ref == 'refs/heads/main'
         with:

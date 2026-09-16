@@ -17,6 +17,39 @@ jobs:
       ir_sha: ${{ steps.ir.outputs.sha }}
     steps:
       - uses: actions/checkout@v4
+      - name: Locate sources (self-healing bootstrap)
+        run: |
+          # Make the build work no matter how the project got into the repo:
+          #  (a) a dropped project *.zip at root  -> expand it
+          #  (b) files committed inside a wrapper folder (Atoms3_assistant/...,
+          #      the usual result of Windows "Extract All") -> hoist to root
+          #  (c) already flat at root -> no-op
+          set -e
+          zip=$(ls -t *.zip 2>/dev/null | head -1 || true)
+          if [ -n "$zip" ]; then
+            echo "Expanding $zip"
+            tmp=$(mktemp -d); unzip -oq "$zip" -d "$tmp"
+            entries=$(ls -A "$tmp")
+            if [ "$(echo "$entries" | wc -l)" -eq 1 ] && [ -d "$tmp/$entries" ]; then
+              src="$tmp/$entries"; else src="$tmp"; fi
+            cp -a "$src"/. ./ 2>/dev/null || (cd "$src" && tar cf - . | (cd "$OLDPWD" && tar xf -))
+            rm -rf "$tmp"
+          fi
+          if [ ! -f tools/build_ir.py ]; then
+            # look for the project in a subfolder and hoist it up to root
+            found=$(find . -name build_ir.py -path '*/tools/build_ir.py' | head -1 || true)
+            if [ -n "$found" ]; then
+              root=$(dirname "$(dirname "$found")")
+              echo "Hoisting project from '$root' to repo root"
+              cp -a "$root"/. ./ 2>/dev/null || (cd "$root" && tar cf - --exclude=.git . | (cd "$GITHUB_WORKSPACE" && tar xf -))
+            fi
+          fi
+          if [ ! -f tools/build_ir.py ]; then
+            echo "::error::tools/build_ir.py not found anywhere. Commit the project so that tools/, firmware/, web/ sit at the repo ROOT (not inside a subfolder), or drop the project .zip at the root."
+            echo "Repo tree for debugging:"; find . -maxdepth 2 -not -path './.git/*' | sort
+            exit 1
+          fi
+          echo "Sources located. Root contents:"; ls
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -49,6 +82,28 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Locate sources (self-healing bootstrap)
+        run: |
+          set -e
+          zip=$(ls -t *.zip 2>/dev/null | head -1 || true)
+          if [ -n "$zip" ]; then
+            tmp=$(mktemp -d); unzip -oq "$zip" -d "$tmp"
+            entries=$(ls -A "$tmp")
+            if [ "$(echo "$entries" | wc -l)" -eq 1 ] && [ -d "$tmp/$entries" ]; then
+              src="$tmp/$entries"; else src="$tmp"; fi
+            cp -a "$src"/. ./ 2>/dev/null || (cd "$src" && tar cf - . | (cd "$OLDPWD" && tar xf -))
+            rm -rf "$tmp"
+          fi
+          if [ ! -f firmware/CMakeLists.txt ]; then
+            found=$(find . -name CMakeLists.txt -path '*/firmware/CMakeLists.txt' | head -1 || true)
+            if [ -n "$found" ]; then
+              root=$(dirname "$(dirname "$found")")
+              cp -a "$root"/. ./ 2>/dev/null || (cd "$root" && tar cf - --exclude=.git . | (cd "$GITHUB_WORKSPACE" && tar xf -))
+            fi
+          fi
+          if [ ! -f firmware/CMakeLists.txt ]; then
+            echo "::error::firmware/ not found at repo root."; find . -maxdepth 2 -not -path './.git/*' | sort; exit 1
+          fi
       - uses: actions/download-artifact@v4
         with:
           name: fox-data
@@ -88,8 +143,8 @@ jobs:
                   { "path": "bootloader.bin",        "offset": 0 },
                   { "path": "partition-table.bin",   "offset": 32768 },
                   { "path": "fox.bin",               "offset": 131072 },
-                  { "path": "foxbrainA.bin",         "offset": 6946816 },
-                  { "path": "foxdata.bin",           "offset": 7733248 }
+                  { "path": "foxbrainA.bin",         "offset": 6488064 },
+                  { "path": "foxdata.bin",           "offset": 7536640 }
                 ]
               }
             ]
@@ -108,8 +163,8 @@ jobs:
                   { "path": "bootloader.bin",        "offset": 0 },
                   { "path": "partition-table.bin",   "offset": 32768 },
                   { "path": "fox.bin",               "offset": 131072 },
-                  { "path": "foxbrainB.bin",         "offset": 6946816 },
-                  { "path": "foxdata.bin",           "offset": 7733248 }
+                  { "path": "foxbrainB.bin",         "offset": 6488064 },
+                  { "path": "foxdata.bin",           "offset": 7536640 }
                 ]
               }
             ]

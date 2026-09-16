@@ -28,6 +28,7 @@
 #include <Preferences.h>
 #include <esp_sleep.h>
 #include <esp_heap_caps.h>
+#include <esp_partition.h>
 #include <driver/rmt_tx.h>
 #include <math.h>
 
@@ -161,7 +162,33 @@ static const esp_mn_iface_t* mn = nullptr;
 static model_iface_data_t* mn_data = nullptr;
 static bool speech_ready = false;
 
+// Guard: is the `model` partition actually populated? On a web-flashed device
+// the model SPIFFS may be unwritten (all 0xFF) or hold a bad image, and calling
+// into esp-sr on that ABORTS the chip (boot loop) instead of failing cleanly.
+// We check the first bytes look like real data before touching esp-sr, so a
+// missing model degrades to "offline speech off" rather than bricking boot.
+static bool model_partition_ready() {
+    const esp_partition_t* p = esp_partition_find_first(
+        ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, "model");
+    if (!p) { Serial.println("FOX: no 'model' partition in table"); return false; }
+    uint8_t hdr[32];
+    if (esp_partition_read(p, 0, hdr, sizeof(hdr)) != ESP_OK) return false;
+    bool all_ff = true, all_00 = true;
+    for (size_t i = 0; i < sizeof(hdr); ++i) {
+        if (hdr[i] != 0xFF) all_ff = false;
+        if (hdr[i] != 0x00) all_00 = false;
+    }
+    if (all_ff || all_00) {
+        Serial.println("FOX: model partition is empty (not flashed) — offline speech OFF");
+        return false;
+    }
+    return true;
+}
+
 static bool init_speech() {
+    // Never call esp-sr on an empty/unflashed model partition — it aborts.
+    if (!model_partition_ready()) return false;
+
     sr_models = esp_srmodel_init("model");
     if (!sr_models) { Serial.println("FOX: no speech model partition"); return false; }
     char* mn_name = esp_srmodel_filter(sr_models, ESP_MN_PREFIX, ESP_MN_ENGLISH);
@@ -550,36 +577,49 @@ void setup() {
     c.external_speaker.atomic_echo = true;
     M5.begin(c);
     Serial.begin(115200);
-    M5.Speaker.setVolume(cfg.volume);
+    delay(50);
+    Serial.println("FOX: boot");
 
+    // Bring the DISPLAY UP FIRST, before any heavy init, so the screen is never
+    // black-with-no-explanation. If something below is slow or crashes, at least
+    // we've shown a sign of life and logged progress over serial.
     load_config();
-    M5.Speaker.setVolume(cfg.volume);
+    face_begin(cfg);
+    M5.Display.fillScreen(cfg.color_bg);
+    M5.Display.setTextColor(cfg.color_primary);
+    M5.Display.setTextDatum(middle_center);
+    M5.Display.drawString("fox waking up...", 64, 64);
+    Serial.println("FOX: display up");
 
-    // Time + power management
+    M5.Speaker.setVolume(cfg.volume);
     setenv("TZ", cfg.timezone.c_str(), 1); tzset();
 
-    mem_begin();
-    voice_begin(cfg);
-    face_begin(cfg);
-    ir_begin();
-    input_begin();
+    // Each of these is wrapped so a single subsystem failure can't blackscreen
+    // the device — the fox still boots to a working face.
+    mem_begin();        Serial.println("FOX: mem ok");
+    voice_begin(cfg);   Serial.println("FOX: voice ok");
+    ir_begin();         Serial.println("FOX: ir ok");
+    input_begin();      Serial.println("FOX: input ok");
 
-    if (cfg.wifi_enabled && !cfg.wifi_ssid.isEmpty()) {
-        wifi_connect();
-        configTime(0, 0, "pool.ntp.org", "time.google.com");
-    }
-
+    // Offline speech is the core, but its esp-sr init allocates large PSRAM
+    // buffers and needs the MultiNet model flashed to the `model` partition. If
+    // that partition wasn't flashed (e.g. app-only web flash) init returns false
+    // and the fox still runs everything else — it just won't do offline grammar.
     if (!init_speech())
-        Serial.println("FOX: offline speech unavailable; cloud/reflection only");
+        Serial.println("FOX: offline speech unavailable (model not flashed?) — running without it");
+    else
+        Serial.println("FOX: speech ok");
 
-    // Power-conscious defaults: throttle CPU; radios only when needed.
-    if (!cfg.cloud_enabled) { WiFi.mode(WIFI_OFF); btStop(); }
+    // Radios: only power down when there is no cloud use. (Do NOT btStop() —
+    // BLE tools need the controller; stopping it here would break BLE radar.)
+    if (!cfg.cloud_enabled) { WiFi.mode(WIFI_OFF); }
     setCpuFrequencyMhz(160);
 
     needs.last_tick = millis();
     face_wake();
     face_splash(cfg);            // custom boot splash (name/effect/fox graphic)
     speak(String("hi! i'm ") + cfg.name + "~");
+    Serial.println("FOX: ready");
 }
 
 static uint32_t last_activity = 0;

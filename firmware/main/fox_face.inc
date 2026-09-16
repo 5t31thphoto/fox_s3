@@ -71,7 +71,7 @@ void face_splash(FoxConfig& c) {
 // Draw the fox at the current expression. Eyes/ears/mouth respond to mood and
 // to the live mouth_open value while speaking.
 void face_draw(FoxMood mood) {
-    if (!face_canvas) return;
+    if (!face_canvas || !face_cfg) return;   // never draw before face_begin()
     uint16_t bg = face_cfg->color_bg;
     uint16_t fur = face_cfg->color_primary;
     uint16_t cream = face_cfg->color_accent;

@@ -77,7 +77,7 @@ jobs:
             --ac     assets/ir/ac.ir
           echo "sha=$(sha256sum firmware/main/data/fox_ir.bin | cut -c1-16)" >> $GITHUB_OUTPUT
 
-      - name: Train brain packs (FOXB) — CPU numpy, no torch
+      - name: Train brain packs (FOXB) â€” CPU numpy, no torch
         run: |
           python tools/train_brain.py --pack A --out firmware/main/data/foxbrainA.bin --steps 6000
           python tools/train_brain.py --pack B --out firmware/main/data/foxbrainB.bin --steps 5000
@@ -149,11 +149,14 @@ jobs:
           model_path=$(python3 -c "import json;d=json.load(open('flasher_args.json'));print([f for o,f in d['flash_files'].items() if 'srmodels' in f or 'model' in f.lower()][0])")
           echo "model image path (from IDF): $model_path"
           cp "$model_path" ../../dist/srmodels.bin
-          test -s ../../dist/srmodels.bin || { echo "::error::srmodels.bin is empty/missing — offline speech would brick a web flash. Failing build."; exit 1; }
+          test -s ../../dist/srmodels.bin || { echo "::error::srmodels.bin is empty/missing â€” offline speech would brick a web flash. Failing build."; exit 1; }
           echo "srmodels.bin size: $(stat -c%s ../../dist/srmodels.bin) bytes"
           # Export the exact offsets IDF used, so the manifest can't drift from
           # the partition table.
-          python3 - <<'PY' > offsets.env
+          # IMPORTANT: do NOT write into firmware/build â€” that dir is often
+          # root-owned after espressif/esp-idf-ci-action (Docker), which causes
+          # "offsets.env: Permission denied". Write only under dist/ (we own it).
+          python3 - <<'PY' > ../../dist/offsets.env
           import json
           d=json.load(open("flasher_args.json"))
           def off_for(sub):
@@ -161,11 +164,12 @@ jobs:
                   if sub in f: return int(o,16)
               return None
           app=off_for("fox.bin"); model=off_for("srmodels")
+          if app is None or model is None:
+              raise SystemExit(f"missing offset app={app} model={model} in {d['flash_files']}")
           print(f"APP_OFFSET={app}")
           print(f"MODEL_OFFSET={model}")
           PY
-          cat offsets.env
-          cp offsets.env ../../dist/offsets.env
+          echo "=== offsets.env ==="; cat ../../dist/offsets.env
           cd ../../dist
           sha256sum * > SHA256SUMS
 

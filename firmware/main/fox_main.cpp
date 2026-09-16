@@ -208,7 +208,24 @@ static bool init_speech() {
     afe = esp_afe_handle_from_config(ac);
     afe_data = afe ? afe->create_from_config(ac) : nullptr;
     afe_config_free(ac);
-    if (!afe_data) return false;
+    // Retry with the lighter LOW_COST profile if HIGH_PERF couldn't allocate
+    // (BT + WiFi + model already consume a lot of PSRAM). Better ASR-lite than
+    // no ASR at all. (per review: AFE HIGH_PERF can fail under PSRAM pressure)
+    if (!afe_data) {
+        Serial.println("FOX: AFE HIGH_PERF failed, retrying LOW_COST");
+        ac = afe_config_init("M", sr_models, AFE_TYPE_SR, AFE_MODE_LOW_COST);
+        if (ac) {
+            ac->aec_init = false; ac->se_init = false; ac->ns_init = true;
+            ac->vad_init = true;  ac->wakenet_init = false; ac->agc_init = true;
+            ac->fixed_output_channel = true;
+            ac->memory_alloc_mode = AFE_MEMORY_ALLOC_MORE_PSRAM;
+            ac->afe_ringbuf_size = 8;
+            afe = esp_afe_handle_from_config(ac);
+            afe_data = afe ? afe->create_from_config(ac) : nullptr;
+            afe_config_free(ac);
+        }
+    }
+    if (!afe_data) { Serial.println("FOX: AFE unavailable — offline ASR off"); return false; }
 
     if (esp_mn_commands_alloc((esp_mn_iface_t*)mn, (model_iface_data_t*)mn_data) != ESP_OK)
         return false;

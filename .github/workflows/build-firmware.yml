@@ -143,8 +143,8 @@ jobs:
                   { "path": "bootloader.bin",        "offset": 0 },
                   { "path": "partition-table.bin",   "offset": 32768 },
                   { "path": "fox.bin",               "offset": 131072 },
-                  { "path": "foxbrainA.bin",         "offset": 6488064 },
-                  { "path": "foxdata.bin",           "offset": 7536640 }
+                  { "path": "foxbrainA.bin",         "offset": 7077888 },
+                  { "path": "foxdata.bin",           "offset": 7995392 }
                 ]
               }
             ]
@@ -163,8 +163,8 @@ jobs:
                   { "path": "bootloader.bin",        "offset": 0 },
                   { "path": "partition-table.bin",   "offset": 32768 },
                   { "path": "fox.bin",               "offset": 131072 },
-                  { "path": "foxbrainB.bin",         "offset": 6488064 },
-                  { "path": "foxdata.bin",           "offset": 7536640 }
+                  { "path": "foxbrainB.bin",         "offset": 7077888 },
+                  { "path": "foxdata.bin",           "offset": 7995392 }
                 ]
               }
             ]

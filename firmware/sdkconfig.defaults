@@ -58,3 +58,13 @@ CONFIG_ESP_WIFI_SW_COEXIST_ENABLE=y
 # dangling-reference) hard-stop the build. The IDF-sanctioned switch. ----
 CONFIG_COMPILER_DISABLE_GCC12_WARNINGS=y
 CONFIG_COMPILER_DISABLE_GCC13_WARNINGS=y
+
+# ---- mbedTLS PSK ciphersuites: REQUIRED for arduino-esp32's WiFiClientSecure/
+# NetworkClientSecure to LINK. Without these, ssl_client.cpp wraps its entire
+# body in `#if defined(...PSK...) #else #warning #endif`, so start_ssl_client /
+# stop_ssl_socket / ssl_init etc. are compiled out -> "undefined reference" at
+# link. Enabling PSK modes defines MBEDTLS_KEY_EXCHANGE__SOME__PSK_ENABLED and
+# the real function bodies get built. (This is the documented fix; the earlier
+# build even emitted the #warning pointing right at it.)
+CONFIG_MBEDTLS_PSK_MODES=y
+CONFIG_MBEDTLS_KEY_EXCHANGE_PSK=y

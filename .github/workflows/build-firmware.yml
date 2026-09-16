@@ -6,16 +6,6 @@ on:
   workflow_dispatch:
   pull_request:
 
-# Pages deploy needs these; concurrency avoids overlapping deploys.
-permissions:
-  contents: read
-  pages: write
-  id-token: write
-
-concurrency:
-  group: "pages"
-  cancel-in-progress: false
-
 # Build the universal firmware plus both swappable brain packs and the IR
 # library, then publish a merged flashable image + esp-web-tools manifest so the
 # web page can flash without a toolchain. Secrets are NEVER involved: the fox is
@@ -132,20 +122,23 @@ jobs:
           cd firmware/build
           # Core app + bootloader + partition table.
           cp bootloader/bootloader.bin partition_table/partition-table.bin fox.bin ../../dist/
+          # ESP-SR generates the selected MultiNet/AFE model image during the
+          # IDF build. It is a real flash partition and MUST travel with the
+          # app; flashing only fox.bin leaves the model partition erased and
+          # esp_srmodel_init() will map garbage.
+          test -s srmodels/srmodels.bin
+          model_size=$(stat -c%s srmodels/srmodels.bin)
+          model_capacity=$((0x260000))
+          if [ "$model_size" -gt "$model_capacity" ]; then
+            echo "::error::ESP-SR model image ($model_size bytes) exceeds model partition ($model_capacity bytes)"
+            exit 1
+          fi
+          cp srmodels/srmodels.bin ../../dist/model.bin
+          echo "ESP-SR model image: $model_size bytes / $model_capacity bytes"
           # Data partitions the web tool flashes at their partition offsets.
           cp ../main/data/fox_ir.bin      ../../dist/foxdata.bin
           cp ../main/data/foxbrainA.bin   ../../dist/foxbrainA.bin
           cp ../main/data/foxbrainB.bin   ../../dist/foxbrainB.bin
-          # esp-sr MultiNet/AFE model image (srmodels.bin). Without this on the
-          # `model` partition, offline speech can't init. esp-sr writes it under
-          # the build tree; find it wherever this IDF version placed it.
-          model=$(find . -name 'srmodels.bin' | head -1)
-          if [ -n "$model" ]; then
-            cp "$model" ../../dist/srmodels.bin
-            echo "Included model image: $model ($(stat -c%s "$model") bytes)"
-          else
-            echo "WARNING: srmodels.bin not found — offline speech won't work from a web flash."
-          fi
           cd ../../dist
           sha256sum * > SHA256SUMS
 
@@ -163,9 +156,9 @@ jobs:
                   { "path": "bootloader.bin",        "offset": 0 },
                   { "path": "partition-table.bin",   "offset": 32768 },
                   { "path": "fox.bin",               "offset": 131072 },
-                  { "path": "srmodels.bin",          "offset": 4587520 },
-                  { "path": "foxbrainA.bin",         "offset": 7077888 },
-                  { "path": "foxdata.bin",           "offset": 7995392 }
+                  { "path": "model.bin",              "offset": 3080192 },
+                  { "path": "foxbrainA.bin",         "offset": 6488064 },
+                  { "path": "foxdata.bin",           "offset": 7536640 }
                 ]
               }
             ]
@@ -184,9 +177,9 @@ jobs:
                   { "path": "bootloader.bin",        "offset": 0 },
                   { "path": "partition-table.bin",   "offset": 32768 },
                   { "path": "fox.bin",               "offset": 131072 },
-                  { "path": "srmodels.bin",          "offset": 4587520 },
-                  { "path": "foxbrainB.bin",         "offset": 7077888 },
-                  { "path": "foxdata.bin",           "offset": 7995392 }
+                  { "path": "model.bin",              "offset": 3080192 },
+                  { "path": "foxbrainB.bin",         "offset": 6488064 },
+                  { "path": "foxdata.bin",           "offset": 7536640 }
                 ]
               }
             ]
@@ -204,10 +197,6 @@ jobs:
           mkdir -p site
           cp -r web/* site/
           cp -r dist site/firmware
-          # index.html (the flasher) is now the site root. .nojekyll stops
-          # GitHub from running Jekyll on it (which can hide files/underscores).
-          touch site/.nojekyll
-          echo "Site root contents:"; ls -la site
       - uses: actions/upload-pages-artifact@v3
         if: github.ref == 'refs/heads/main'
         with:

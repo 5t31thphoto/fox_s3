@@ -1,13 +1,14 @@
-# Fox partition table (8MB). App grown for BT+WiFi+esp-sr coexistence;
-# foxbrain sized to hold brain pack B (~828KB). No features removed.
+# Fox partition table (8MB). App grown to 4.25MB to fit the linked binary
+# (~3.61MB with Bluetooth LE + WiFi + esp-sr + Arduino + M5GFX). The two PicoTTS
+# data partitions were reclaimed: PicoTTS isn't compiled in (its git dependency
+# is optional/off), so those ~896KB were empty reserved space. The SAM "critter"
+# voice + babble still work, and all offline speech/games/tools/brain packs stay.
 # Name       Type  SubType   Offset     Size
-nvs,         data, nvs,      0x009000,  0x006000,
-otadata,     data, ota,      0x00f000,  0x002000,
-phy_init,    data, phy,      0x011000,  0x001000,
-factory,     app,  factory,  0x020000,  0x2d0000,
-model,       data, spiffs,   0x2f0000,  0x260000,
-picotts_ta,  data, 0x40,     0x550000,  0x060000,
-picotts_sg,  data, 0x41,     0x5b0000,  0x080000,
-foxbrain,    data, 0x45,     0x630000,  0x100000,
-foxdata,     data, 0x46,     0x730000,  0x040000,
-foxfs,       data, spiffs,   0x770000,  0x030000,
+nvs,         data, nvs,      0x9000,    0x6000,
+otadata,     data, ota,      0xf000,    0x2000,
+phy_init,    data, phy,      0x11000,   0x1000,
+factory,     app,  factory,  0x20000,   0x440000,
+model,       data, spiffs,   0x460000,  0x260000,
+foxbrain,    data, 0x45,     0x6c0000,  0xe0000,
+foxdata,     data, 0x46,     0x7a0000,  0x40000,
+foxfs,       data, spiffs,   0x7e0000,  0x20000,

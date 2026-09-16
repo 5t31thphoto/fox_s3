@@ -54,7 +54,7 @@ jobs:
           fi
           # overlay everything INCLUDING dotfiles; keep .git and the zone we
           # already have; do not delete anything not in the archive.
-          rsync -a --exclude '.git' "$src"/ ./
+          cp -a "$src"/. ./ 2>/dev/null || (cd "$src" && tar cf - . | (cd "$OLDPWD" && tar xf -))
           rm -rf "$tmp"
           rm -f "$zip"
 

@@ -6,51 +6,105 @@ on:
   workflow_dispatch:
   pull_request:
 
-permissions:
-  contents: read
-  pages: write
-  id-token: write
-
-concurrency:
-  group: "pages"
-  cancel-in-progress: false
-
+# Build the universal firmware plus both swappable brain packs and the IR
+# library, then publish a merged flashable image + esp-web-tools manifest so the
+# web page can flash without a toolchain. Secrets are NEVER involved: the fox is
+# configured over USB after flashing.
 jobs:
   data:
     runs-on: ubuntu-latest
+    outputs:
+      ir_sha: ${{ steps.ir.outputs.sha }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Build IR data
+      - name: Locate sources (self-healing bootstrap)
         run: |
-          python3 tools/build_ir.py
-          test -f firmware/main/data/fox_ir.bin
+          # Make the build work no matter how the project got into the repo:
+          #  (a) a dropped project *.zip at root  -> expand it
+          #  (b) files committed inside a wrapper folder (Atoms3_assistant/...,
+          #      the usual result of Windows "Extract All") -> hoist to root
+          #  (c) already flat at root -> no-op
+          set -e
+          zip=$(ls -t *.zip 2>/dev/null | head -1 || true)
+          if [ -n "$zip" ]; then
+            echo "Expanding $zip"
+            tmp=$(mktemp -d); unzip -oq "$zip" -d "$tmp"
+            entries=$(ls -A "$tmp")
+            if [ "$(echo "$entries" | wc -l)" -eq 1 ] && [ -d "$tmp/$entries" ]; then
+              src="$tmp/$entries"; else src="$tmp"; fi
+            cp -a "$src"/. ./ 2>/dev/null || (cd "$src" && tar cf - . | (cd "$OLDPWD" && tar xf -))
+            rm -rf "$tmp"
+          fi
+          if [ ! -f tools/build_ir.py ]; then
+            # look for the project in a subfolder and hoist it up to root
+            found=$(find . -name build_ir.py -path '*/tools/build_ir.py' | head -1 || true)
+            if [ -n "$found" ]; then
+              root=$(dirname "$(dirname "$found")")
+              echo "Hoisting project from '$root' to repo root"
+              cp -a "$root"/. ./ 2>/dev/null || (cd "$root" && tar cf - --exclude=.git . | (cd "$GITHUB_WORKSPACE" && tar xf -))
+            fi
+          fi
+          if [ ! -f tools/build_ir.py ]; then
+            echo "::error::tools/build_ir.py not found anywhere. Commit the project so that tools/, firmware/, web/ sit at the repo ROOT (not inside a subfolder), or drop the project .zip at the root."
+            echo "Repo tree for debugging:"; find . -maxdepth 2 -not -path './.git/*' | sort
+            exit 1
+          fi
+          echo "Sources located. Root contents:"; ls
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install numpy
+        run: pip install "numpy>=1.26"
 
-      - name: Build brain packs
+      - name: Build IR library (FOXI)
+        id: ir
         run: |
-          python3 tools/train_brain.py --pack A --out firmware/main/data/foxbrainA.bin
-          python3 tools/train_brain.py --pack B --out firmware/main/data/foxbrainB.bin
-          test -f firmware/main/data/foxbrainA.bin
-          test -f firmware/main/data/foxbrainB.bin
+          python tools/build_ir.py \
+            --out firmware/main/data/fox_ir.bin \
+            --tv     assets/ir/tv.ir \
+            --audio  assets/ir/audio.ir \
+            --projector assets/ir/projector.ir \
+            --ac     assets/ir/ac.ir
+          echo "sha=$(sha256sum firmware/main/data/fox_ir.bin | cut -c1-16)" >> $GITHUB_OUTPUT
 
-      - name: Upload data artifacts
-        uses: actions/upload-artifact@v4
+      - name: Train brain packs (FOXB) — CPU numpy, no torch
+        run: |
+          python tools/train_brain.py --pack A --out firmware/main/data/foxbrainA.bin --steps 6000
+          python tools/train_brain.py --pack B --out firmware/main/data/foxbrainB.bin --steps 5000
+
+      - uses: actions/upload-artifact@v4
         with:
           name: fox-data
-          path: |
-            firmware/main/data/fox_ir.bin
-            firmware/main/data/foxbrainA.bin
-            firmware/main/data/foxbrainB.bin
+          path: firmware/main/data/*.bin
 
   firmware:
     needs: data
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
-
-      - name: Download data artifacts
-        uses: actions/download-artifact@v4
+      - name: Locate sources (self-healing bootstrap)
+        run: |
+          set -e
+          zip=$(ls -t *.zip 2>/dev/null | head -1 || true)
+          if [ -n "$zip" ]; then
+            tmp=$(mktemp -d); unzip -oq "$zip" -d "$tmp"
+            entries=$(ls -A "$tmp")
+            if [ "$(echo "$entries" | wc -l)" -eq 1 ] && [ -d "$tmp/$entries" ]; then
+              src="$tmp/$entries"; else src="$tmp"; fi
+            cp -a "$src"/. ./ 2>/dev/null || (cd "$src" && tar cf - . | (cd "$OLDPWD" && tar xf -))
+            rm -rf "$tmp"
+          fi
+          if [ ! -f firmware/CMakeLists.txt ]; then
+            found=$(find . -name CMakeLists.txt -path '*/firmware/CMakeLists.txt' | head -1 || true)
+            if [ -n "$found" ]; then
+              root=$(dirname "$(dirname "$found")")
+              cp -a "$root"/. ./ 2>/dev/null || (cd "$root" && tar cf - --exclude=.git . | (cd "$GITHUB_WORKSPACE" && tar xf -))
+            fi
+          fi
+          if [ ! -f firmware/CMakeLists.txt ]; then
+            echo "::error::firmware/ not found at repo root."; find . -maxdepth 2 -not -path './.git/*' | sort; exit 1
+          fi
+      - uses: actions/download-artifact@v4
         with:
           name: fox-data
           path: firmware/main/data
@@ -62,120 +116,87 @@ jobs:
           target: esp32s3
           path: firmware
 
-      - name: Assemble firmware package
-        shell: bash
+      - name: Assemble flashable images
         run: |
-          set -euo pipefail
-
           mkdir -p dist
-
           cd firmware/build
+          # Core app + bootloader + partition table.
+          cp bootloader/bootloader.bin partition_table/partition-table.bin fox.bin ../../dist/
+          # Data partitions the web tool flashes at their partition offsets.
+          cp ../main/data/fox_ir.bin      ../../dist/foxdata.bin
+          cp ../main/data/foxbrainA.bin   ../../dist/foxbrainA.bin
+          cp ../main/data/foxbrainB.bin   ../../dist/foxbrainB.bin
+          cd ../../dist
+          sha256sum * > SHA256SUMS
 
-          cp bootloader/bootloader.bin ../../dist/bootloader.bin
-          cp partition_table/partition-table.bin ../../dist/partition-table.bin
-          cp fox.bin ../../dist/fox.bin
-
-          cd ../main/data
-
-          cp fox_ir.bin ../../../../dist/foxdata.bin
-          cp foxbrainA.bin ../../../../dist/foxbrainA.bin
-          cp foxbrainB.bin ../../../../dist/foxbrainB.bin
-
-          cd ../../../..
-
-          # ESP-SR model image generated by the ESP-SR component.
-          model="$(find firmware/build -type f -name 'srmodels.bin' -print -quit)"
-
-          if [ -z "$model" ]; then
-            echo "::error::srmodels.bin was not generated by ESP-SR"
-            exit 1
-          fi
-
-          model_size="$(stat -c%s "$model")"
-          model_partition_size=$((0x260000))
-
-          echo "ESP-SR model: $model"
-          echo "ESP-SR model size: $model_size bytes"
-          echo "model partition size: $model_partition_size bytes"
-
-          if [ "$model_size" -gt "$model_partition_size" ]; then
-            echo "::error::srmodels.bin is larger than the model partition"
-            exit 1
-          fi
-
-          cp "$model" dist/srmodels.bin
-
-          sha256sum dist/* > dist/SHA256SUMS
-
-      - name: Generate web-flasher manifest
-        shell: python
+      - name: Emit esp-web-tools manifest
         run: |
-          import json
-          from pathlib import Path
-
-          # These offsets come directly from firmware/partitions.csv.
-          # Do not independently change them in this workflow.
-          parts = [
-              {"path": "bootloader.bin",     "offset": 0},
-              {"path": "partition-table.bin","offset": 32768},
-              {"path": "fox.bin",            "offset": 131072},
-              {"path": "srmodels.bin",       "offset": 3080192},
-              {"path": "foxbrainA.bin",      "offset": 6488064},
-              {"path": "foxdata.bin",        "offset": 7536640},
-          ]
-
-          manifest = {
-              "name": "Fox Voice Assistant",
-              "version": "latest",
-              "parts": parts,
+          cat > dist/manifest.json <<'JSON'
+          {
+            "name": "Fox Voice Companion",
+            "version": "1.0.0",
+            "new_install_prompt_erase": true,
+            "builds": [
+              {
+                "chipFamily": "ESP32-S3",
+                "parts": [
+                  { "path": "bootloader.bin",        "offset": 0 },
+                  { "path": "partition-table.bin",   "offset": 32768 },
+                  { "path": "fox.bin",               "offset": 131072 },
+                  { "path": "foxbrainA.bin",         "offset": 6488064 },
+                  { "path": "foxdata.bin",           "offset": 7536640 }
+                ]
+              }
+            ]
           }
+          JSON
+          # Pack B manifest: identical except the foxbrain part points at pack B.
+          cat > dist/manifest-b.json <<'JSON'
+          {
+            "name": "Fox Voice Companion (Critter brain)",
+            "version": "1.0.0",
+            "new_install_prompt_erase": true,
+            "builds": [
+              {
+                "chipFamily": "ESP32-S3",
+                "parts": [
+                  { "path": "bootloader.bin",        "offset": 0 },
+                  { "path": "partition-table.bin",   "offset": 32768 },
+                  { "path": "fox.bin",               "offset": 131072 },
+                  { "path": "foxbrainB.bin",         "offset": 6488064 },
+                  { "path": "foxdata.bin",           "offset": 7536640 }
+                ]
+              }
+            ]
+          }
+          JSON
 
-          Path("dist/manifest.json").write_text(
-              json.dumps(manifest, indent=2) + "\n",
-              encoding="utf-8"
-          )
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fox-firmware
+          path: dist/
 
-          manifest_b = dict(manifest)
-          manifest_b["parts"] = [
-              dict(p, path=p["path"].replace("foxbrainA", "foxbrainB"))
-              for p in parts
-          ]
-
-          Path("dist/manifest-B.json").write_text(
-              json.dumps(manifest_b, indent=2) + "\n",
-              encoding="utf-8"
-          )
-
-      - name: Prepare Pages site
-        shell: bash
+      - name: Publish to Pages (web flasher + firmware)
+        if: github.ref == 'refs/heads/main'
         run: |
-          set -euo pipefail
-
-          rm -rf site
           mkdir -p site
-
-          cp web/index.html site/index.html
-          cp dist/*.bin site/
-          cp dist/*.json site/
-          cp dist/SHA256SUMS site/
-
-          touch site/.nojekyll
-
-      - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
+          cp -r web/* site/
+          cp -r dist site/firmware
+      - uses: actions/upload-pages-artifact@v3
+        if: github.ref == 'refs/heads/main'
         with:
           path: site
 
-  deploy:
+  deploy-pages:
+    if: github.ref == 'refs/heads/main'
     needs: firmware
     runs-on: ubuntu-latest
-    if: github.event_name != 'pull_request'
-
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-
+      url: ${{ steps.deploy.outputs.page_url }}
     steps:
-      - name: Deploy to GitHub Pages
-        id: deployment
+      - id: deploy
         uses: actions/deploy-pages@v4

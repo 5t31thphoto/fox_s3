@@ -1,14 +1,11 @@
-# Fox partition table (8MB). App grown to 4.25MB to fit the linked binary
-# (~3.61MB with Bluetooth LE + WiFi + esp-sr + Arduino + M5GFX). The two PicoTTS
-# data partitions were reclaimed: PicoTTS isn't compiled in (its git dependency
-# is optional/off), so those ~896KB were empty reserved space. The SAM "critter"
-# voice + babble still work, and all offline speech/games/tools/brain packs stay.
+# Fox partition table (8MB) — model grown to fit MultiNet srmodels.bin (~2.76MB)
+# factory trimmed to 0x3F0000 (~3.94MB); still fits a ~3.61MB app with headroom.
 # Name       Type  SubType   Offset     Size
 nvs,         data, nvs,      0x9000,    0x6000,
 otadata,     data, ota,      0xf000,    0x2000,
 phy_init,    data, phy,      0x11000,   0x1000,
-factory,     app,  factory,  0x20000,   0x440000,
-model,       data, spiffs,   0x460000,  0x260000,
+factory,     app,  factory,  0x20000,   0x3F0000,
+model,       data, spiffs,   0x410000,  0x2B0000,
 foxbrain,    data, 0x45,     0x6c0000,  0xe0000,
 foxdata,     data, 0x46,     0x7a0000,  0x40000,
 foxfs,       data, spiffs,   0x7e0000,  0x20000,

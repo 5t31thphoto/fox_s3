@@ -752,3 +752,30 @@ void loop() {
 
     delay(10);   // nap between frames to save power
 }
+
+// ============================================================================
+//  Explicit entry point.
+//
+//  THE BUG THAT KILLED EVERYTHING: with arduino-esp32 as a managed component,
+//  relying on CONFIG_AUTOSTART_ARDUINO to call setup()/loop() did NOT work in
+//  this project — app_main ran and returned, but setup() was never reached
+//  (the log ended at "Returned from app_main()" with a black screen forever).
+//
+//  So we define app_main ourselves (CONFIG_AUTOSTART_ARDUINO must be =n), do
+//  the Arduino init explicitly, and run setup()/loop() in a task with a
+//  generous stack (esp-sr + M5 + BT init are stack-heavy). This is the standard
+//  robust ESP-IDF + Arduino pattern and guarantees our code actually runs.
+// ============================================================================
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
+static void fox_task(void*) {
+    setup();
+    for (;;) { loop(); vTaskDelay(1); }
+}
+
+extern "C" void app_main(void) {
+    initArduino();                       // USB/Serial/heap/etc. (Arduino core)
+    // Pin to core 1 (APP_CPU), same as Arduino's own loopTask would.
+    xTaskCreatePinnedToCore(fox_task, "fox", 32768, nullptr, 1, nullptr, 1);
+}

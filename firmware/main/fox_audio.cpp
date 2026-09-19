@@ -1,9 +1,14 @@
 // fox_audio.cpp — Echo Base ownership layer (see fox_audio.h).
+//
+// IMPORTANT: Do NOT include driver/i2s.h here. M5EchoBase (IDF >= 5) uses
+// Arduino ESP_I2S.h; including the legacy IDF driver/i2s.h causes:
+//   error: conflicting declaration 'typedef enum i2s_mode_t i2s_mode_t'
+// and breaks the CI build.
 #include "fox_audio.h"
 #include "fox.h"
 #include <math.h>
 #include <string.h>
-#include <driver/i2s.h>
+#include <stdlib.h>
 
 #if (ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0))
 M5EchoBase g_echo;
@@ -27,14 +32,7 @@ bool audio_begin(uint8_t volume) {
         return false;
     }
 
-    // Demo note: EchoBase library default channel format differs; force mono 16-bit.
-#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
-    // New I2S API path is internal to M5EchoBase; no extra i2s_set_clk needed
-    // for basic record/play. Older path used:
-    //   i2s_set_clk(I2S_NUM_0, 16000, I2S_BITS_PER_CHAN_16BIT, I2S_CHANNEL_MONO);
-#else
-    i2s_set_clk(I2S_NUM_0, SAMPLE_RATE, I2S_BITS_PER_SAMPLE_16BIT, I2S_CHANNEL_MONO);
-#endif
+    // I2S is owned by M5EchoBase (ESP_I2S on IDF 5.x). No legacy i2s_set_clk.
 
     g_echo.setMicGain(ES8311_MIC_GAIN_6DB);
     g_echo.setSpeakerVolume(volume > 100 ? 100 : volume);
@@ -52,24 +50,21 @@ void audio_set_volume(uint8_t volume) {
 }
 
 void audio_speaker_end() {
-    // EchoBase keeps the driver; just mute so capture is clean.
     if (g_echo_ok) g_echo.setMute(true);
 }
 
 void audio_mic_end() {
-    // Nothing to tear down; next record() will re-use the same I2S.
+    // EchoBase keeps the driver; next record() reuses the same I2S.
 }
 
 bool audio_record(int16_t* buf, size_t size_samples) {
     if (!g_echo_ok || !buf || !size_samples) return false;
-    // EchoBase::record takes byte count.
     return g_echo.record((uint8_t*)buf, (int)(size_samples * sizeof(int16_t)));
 }
 
 bool audio_play_pcm16(const int16_t* buf, size_t size_samples, int sample_rate) {
     if (!g_echo_ok || !buf || !size_samples) return false;
     g_echo.setMute(false);
-    // Duration estimate so callers can wait roughly the right amount.
     uint32_t ms = (uint32_t)((size_samples * 1000ULL) / (sample_rate > 0 ? sample_rate : SAMPLE_RATE));
     s_play_until = millis() + ms + 20;
     return g_echo.play((uint8_t*)buf, (int)(size_samples * sizeof(int16_t)));
@@ -77,7 +72,6 @@ bool audio_play_pcm16(const int16_t* buf, size_t size_samples, int sample_rate) 
 
 bool audio_play_pcm8(const uint8_t* buf, size_t size_bytes, int sample_rate) {
     if (!g_echo_ok || !buf || !size_bytes) return false;
-    // Convert 8-bit unsigned → 16-bit signed in small chunks.
     static int16_t chunk[512];
     g_echo.setMute(false);
     size_t off = 0;
@@ -100,7 +94,6 @@ void audio_tone(int freq_hz, int duration_ms) {
     const int sr = SAMPLE_RATE;
     const int n = (sr * duration_ms) / 1000;
     if (n <= 0) return;
-    // Generate a short mono sine into a temporary buffer (cap ~200 ms to keep stack/heap sane).
     const int MAX_N = sr / 5;  // 200 ms
     int samples = n > MAX_N ? MAX_N : n;
     int16_t* buf = (int16_t*)malloc(samples * sizeof(int16_t));
@@ -108,7 +101,6 @@ void audio_tone(int freq_hz, int duration_ms) {
     for (int i = 0; i < samples; ++i) {
         float t = (float)i / (float)sr;
         float s = sinf(2.0f * 3.14159265f * (float)freq_hz * t);
-        // Soft envelope to avoid clicks
         float env = 1.0f;
         if (i < 32) env = (float)i / 32.0f;
         else if (i > samples - 32) env = (float)(samples - i) / 32.0f;

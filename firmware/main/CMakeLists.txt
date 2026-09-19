@@ -35,4 +35,5 @@ target_compile_options(${COMPONENT_LIB} PRIVATE
     -Wno-error=format
     -Wno-error=sign-compare
     -Wno-error=narrowing
+    -Wno-error=type-limits
 )

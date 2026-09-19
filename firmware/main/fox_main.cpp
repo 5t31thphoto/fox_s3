@@ -602,9 +602,24 @@ void setup() {
 
     auto c = M5.config();
     c.serial_baudrate = 115200;
+    // Tell M5Unified this is specifically an AtomS3R. If the GC9107 panel-ID
+    // probe fails to match (some AtomS3R panel batches — M5GFX issue #222), the
+    // autodetect would otherwise fall back to a display-LESS board identity
+    // (AtomS3Lite) and never bind the LCD. The M5GFX in this build (git master)
+    // also re-probes the panel at 100kHz, which is the real cure for that batch.
+    c.fallback_board = m5::board_t::board_M5AtomS3R;
     // Do NOT enable atomic_echo — it was the blank-screen root cause.
     M5.begin(c);
     Serial.println("FOX: post-M5");
+
+    // Decisive display diagnostics — this tells us if the LCD actually bound.
+    Serial.printf("FOX: board=%d displays=%d LCD=%dx%d\n",
+                  (int)M5.getBoard(), (int)M5.getDisplayCount(),
+                  (int)M5.Display.width(), (int)M5.Display.height());
+    // Instant sign of life: if the panel bound, the screen flashes red now.
+    M5.Display.setBrightness(255);
+    M5.Display.fillScreen(TFT_RED);
+    delay(150);
 
     // Bring the DISPLAY UP FIRST, before any heavy init, so the screen is never
     // black-with-no-explanation. If something below is slow or crashes, at least

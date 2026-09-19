@@ -29,9 +29,15 @@ CONFIG_MODEL_IN_SPIFFS=y
 # We deliberately do NOT enable any WakeNet model: interaction is push-to-talk.
 CONFIG_SR_WN_NONE=y
 
-# ---- USB CDC for the web flasher's post-flash config handshake ----
-CONFIG_ESP_CONSOLE_USB_CDC=y
-CONFIG_TINYUSB_CDC_ENABLED=y
+# ---- USB: use the native USB-Serial-JTAG (what the AtomS3R hardware + factory
+# firmware use). Do NOT force TinyUSB CDC for the IDF console — on the S3 that
+# contends with Arduino's USB stack over the single USB PHY and can stall
+# initArduino()/Serial (symptom: dead after "Returned from app_main()", no
+# serial, black screen). Arduino's Serial (HWCDC) and the IDF console then share
+# the same USB-Serial-JTAG peripheral cleanly. The web-flasher config handshake
+# still works over this port.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ARDUINO_USB_CDC_ON_BOOT=1
 
 # ---- misc ----
 CONFIG_ESP_TASK_WDT_TIMEOUT_S=10

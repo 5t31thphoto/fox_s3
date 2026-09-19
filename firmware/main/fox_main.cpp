@@ -51,6 +51,10 @@ static Preferences prefs;
 // Set by any game/tool/toy when the user double-clicks to bail to the menu.
 // The main loop honors it after the app's own loop returns.
 bool g_goto_menu = false;
+// Set by the "remember this" command: the NEXT captured utterance is stored as
+// a memory instead of being dispatched as a command. (Was previously a dead
+// feature — do_action prompted but nothing ever captured the answer.)
+static bool g_awaiting_memory = false;
 
 static void load_config() {
     prefs.begin("fox", true);
@@ -541,8 +545,8 @@ static void do_action(const char* action) {
     } else if (!strcmp(action, "menu")) {
         open_menu();
     } else if (!strcmp(action, "remember")) {
+        g_awaiting_memory = true;   // the next utterance becomes the memory
         speak("what should i remember? tell me~");
-        // Next utterance is stored verbatim by the caller.
     } else if (!strcmp(action, "recall")) {
         String m = mem_tail(300);
         speak(m.length() ? "i remember: " + m : "we haven't made memories yet");
@@ -568,6 +572,21 @@ static void handle_free_text(const String& text) {
 //  Main capture flow (push-to-talk)
 // ============================================================================
 static void process_utterance(int16_t* audio, size_t n) {
+    // If the previous command was "remember this", capture THIS utterance as a
+    // memory instead of dispatching it. Offline we can't transcribe free speech
+    // to text, so we store a timestamped marker; with cloud we store the words.
+    if (g_awaiting_memory) {
+        g_awaiting_memory = false;
+        if (cfg.cloud_enabled) {
+            String t = cloud_transcribe(audio, n);
+            if (t.length()) { mem_append("memory", t); speak("okay, i'll remember: " + t); return; }
+        }
+        struct tm tm; char b[40] = "a little while ago";
+        if (getLocalTime(&tm, 20)) strftime(b, sizeof(b), "%b %d at %I:%M %p", &tm);
+        mem_append("memory", String("you told me something ") + b);
+        speak("i'll remember this moment~");
+        return;
+    }
     // Try offline command grammar first (works with no network).
     int id = recognize_offline(audio, n);
     if (id >= 0) {
@@ -595,37 +614,22 @@ static void process_utterance(int16_t* audio, size_t n) {
 #include "fox_audio.h"
 
 void setup() {
-    // Serial first so we always see progress even if later init stalls.
-    Serial.begin(115200);
-    delay(200);
-    Serial.println("FOX: pre-M5");
-
     auto c = M5.config();
     c.serial_baudrate = 115200;
-    // Tell M5Unified this is specifically an AtomS3R. If the GC9107 panel-ID
-    // probe fails to match (some AtomS3R panel batches — M5GFX issue #222), the
-    // autodetect would otherwise fall back to a display-LESS board identity
-    // (AtomS3Lite) and never bind the LCD. The M5GFX in this build (git master)
-    // also re-probes the panel at 100kHz, which is the real cure for that batch.
+    // Force AtomS3R identity so a failed panel probe can't fall back to the
+    // display-less AtomS3Lite board type.
     c.fallback_board = m5::board_t::board_M5AtomS3R;
-    // Do NOT enable atomic_echo — it was the blank-screen root cause.
+    // Do NOT enable atomic_echo — it hung M5.begin() on this hardware.
     M5.begin(c);
-    Serial.println("FOX: post-M5");
 
-    // Decisive display diagnostics — this tells us if the LCD actually bound.
+    Serial.begin(115200);
     Serial.printf("FOX: board=%d displays=%d LCD=%dx%d\n",
                   (int)M5.getBoard(), (int)M5.getDisplayCount(),
                   (int)M5.Display.width(), (int)M5.Display.height());
-    // Instant sign of life: if the panel bound, the screen flashes red now.
-    M5.Display.setBrightness(255);
-    M5.Display.fillScreen(TFT_RED);
-    delay(150);
 
-    // Bring the DISPLAY UP FIRST, before any heavy init, so the screen is never
-    // black-with-no-explanation. If something below is slow or crashes, at least
-    // we've shown a sign of life and logged progress over serial.
     load_config();
     face_begin(cfg);
+    M5.Display.setBrightness(255);
     M5.Display.fillScreen(cfg.color_bg);
     M5.Display.setTextColor(cfg.color_primary);
     M5.Display.setTextDatum(middle_center);

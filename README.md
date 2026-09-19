@@ -2,7 +2,7 @@
 
 A cute, fidgety anime-fox companion that lives on an **M5Stack AtomS3R** with an
 **Atomic Echo Base**. It listens, talks, makes faces, remembers you, blasts IR at
-your TV, and plays little games — **entirely offline by default**. If you give it
+your TV, and plays games — **entirely offline by default**. If you give it
 wifi and a free API key, it grows an online brain too. But the online part is a
 *bonus*, never a requirement.
 

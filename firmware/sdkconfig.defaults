@@ -19,7 +19,10 @@ CONFIG_PM_ENABLE=y
 CONFIG_FREERTOS_USE_TICKLESS_IDLE=y
 
 # ---- Arduino ----
-CONFIG_AUTOSTART_ARDUINO=y
+# AUTOSTART must be OFF: we define app_main() ourselves in fox_main.cpp and run
+# setup()/loop() in a task we control. Relying on autostart did NOT call setup()
+# in this managed-component setup (app_main returned, black screen forever).
+CONFIG_AUTOSTART_ARDUINO=n
 CONFIG_ARDUINO_LOOP_STACK_SIZE=32768
 
 # ---- esp-sr: MultiNet7 English, no wake word (PTT only) ----

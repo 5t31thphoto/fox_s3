@@ -15,9 +15,17 @@
 ##     is unreachable.
 dependencies:
   idf: ">=5.1"
-  # Core display/audio/IMU HAL. M5GFX comes in transitively but we pin it too.
-  m5stack/m5unified: "^0.2.17"
-  m5stack/m5gfx: "^0.2.27"
+  # Core display/audio/IMU HAL. PINNED TO GIT master because the AtomS3R GC9107
+  # panel-batch fix (M5GFX PR #256 / issue #222: re-probe the panel ID at 100kHz
+  # when the 8MHz probe returns garbage) is required for the display to bind on
+  # this hardware. Released 0.2.27 predates that fix -> black screen, backlight
+  # on. Both pinned from git so their versions stay mutually compatible.
+  m5stack/m5gfx:
+    git: https://github.com/m5stack/M5GFX.git
+    version: "master"
+  m5stack/m5unified:
+    git: https://github.com/m5stack/M5Unified.git
+    version: "master"
   # Offline speech recognition (MultiNet7 + AFE).
   espressif/esp-sr: "^2.0.0"
   # Arduino core as an IDF component (provides WiFi/BLE/HTTPClient/Preferences).

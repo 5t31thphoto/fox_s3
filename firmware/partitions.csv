@@ -1,11 +1,12 @@
-# Fox partition table (8MB) — model grown to fit MultiNet srmodels.bin (~2.76MB)
-# factory trimmed to 0x3F0000 (~3.94MB); still fits a ~3.61MB app with headroom.
+# Fox partition table (8MB). model grown to 2.8125MB to hold the ~2.63MB
+# esp-sr MultiNet7 image; app 3.875MB (fits the ~3.61MB binary). foxbrain
+# and foxdata offsets are unchanged so the web-flash manifest stays valid.
 # Name       Type  SubType   Offset     Size
-nvs,         data, nvs,      0x9000,    0x6000,
-otadata,     data, ota,      0xf000,    0x2000,
-phy_init,    data, phy,      0x11000,   0x1000,
-factory,     app,  factory,  0x20000,   0x3F0000,
-model,       data, spiffs,   0x410000,  0x2B0000,
-foxbrain,    data, 0x45,     0x6c0000,  0xe0000,
-foxdata,     data, 0x46,     0x7a0000,  0x40000,
-foxfs,       data, spiffs,   0x7e0000,  0x20000,
+nvs,         data, nvs,      0x009000,  0x006000,
+otadata,     data, ota,      0x00f000,  0x002000,
+phy_init,    data, phy,      0x011000,  0x001000,
+factory,     app,  factory,  0x020000,  0x3e0000,
+model,       data, spiffs,   0x400000,  0x2c0000,
+foxbrain,    data, 0x45,     0x6c0000,  0x0e0000,
+foxdata,     data, 0x46,     0x7a0000,  0x040000,
+foxfs,       data, spiffs,   0x7e0000,  0x020000,

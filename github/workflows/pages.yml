@@ -1,0 +1,67 @@
+name: pages
+
+# Fast, standalone GitHub Pages deploy for the web flasher — does NOT rebuild
+# the firmware. Run it from the Actions tab (Run workflow), or it fires on any
+# change to web/. It publishes web/index.html as the site root and pulls the
+# firmware bins from your most recent successful build-firmware run so the
+# "Flash" button works too. If no firmware build has succeeded yet, it still
+# deploys the flasher UI (the USB configurator works without the bins).
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "web/**"
+      - ".github/workflows/pages.yml"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assemble site (flasher at root)
+        run: |
+          mkdir -p site
+          cp -r web/* site/
+          # .nojekyll stops GitHub running Jekyll (which can hide files and
+          # would otherwise render README.md over the flasher).
+          touch site/.nojekyll
+          echo "Site root:"; ls -la site
+
+      - name: Add firmware bins from the last successful build (optional)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set +e
+          rid=$(gh run list --workflow build-firmware.yml --status success \
+                --limit 1 --json databaseId --jq '.[0].databaseId' 2>/dev/null)
+          if [ -n "$rid" ]; then
+            mkdir -p site/firmware
+            gh run download "$rid" --name fox-firmware --dir site/firmware \
+              && echo "Added firmware bins from run $rid (Flash button will work)." \
+              || echo "Could not download firmware artifact; deploying UI only."
+          else
+            echo "No successful build-firmware run found; deploying the flasher UI only."
+            echo "(The USB configurator still works; the Flash button needs a firmware build.)"
+          fi
+          true
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - id: deploy
+        uses: actions/deploy-pages@v4

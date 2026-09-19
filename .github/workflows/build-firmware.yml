@@ -77,7 +77,7 @@ jobs:
             --ac     assets/ir/ac.ir
           echo "sha=$(sha256sum firmware/main/data/fox_ir.bin | cut -c1-16)" >> $GITHUB_OUTPUT
 
-      - name: Train brain packs (FOXB) â€” CPU numpy, no torch
+      - name: Train brain packs (FOXB) — CPU numpy, no torch
         run: |
           python tools/train_brain.py --pack A --out firmware/main/data/foxbrainA.bin --steps 6000
           python tools/train_brain.py --pack B --out firmware/main/data/foxbrainB.bin --steps 5000
@@ -126,62 +126,65 @@ jobs:
           target: esp32s3
           path: firmware
 
-      - name: Assemble flashable images (authoritative offsets from IDF)
+      - name: Assemble images + web-flash manifests (offsets from IDF)
         run: |
           set -e
           mkdir -p dist
-          cd firmware/build
-          # flasher_args.json is IDF's own source of truth: exact file->offset
-          # for bootloader, partition-table, app, AND the esp-sr model image.
+          # Read offsets from IDF's flasher_args.json WITHOUT writing anything
+          # into firmware/build (that dir is root-owned by the IDF Docker action,
+          # so writing there fails with "Permission denied"). We only READ from
+          # build/ and WRITE to dist/ (which we created and own).
+          FA=firmware/build/flasher_args.json
           echo "flasher_args.json flash_files:"
-          python3 - <<'PY'
-          import json
-          d=json.load(open("flasher_args.json"))
-          for off,f in sorted(d["flash_files"].items(), key=lambda x:int(x[0],16)):
-              print(f"  {off}  {f}")
-          PY
-          # Copy the standard images.
-          cp bootloader/bootloader.bin partition_table/partition-table.bin fox.bin ../../dist/
-          cp ../main/data/fox_ir.bin    ../../dist/foxdata.bin
-          cp ../main/data/foxbrainA.bin ../../dist/foxbrainA.bin
-          cp ../main/data/foxbrainB.bin ../../dist/foxbrainB.bin
-          # The esp-sr model image: take its path+offset straight from IDF.
-          model_path=$(python3 -c "import json;d=json.load(open('flasher_args.json'));print([f for o,f in d['flash_files'].items() if 'srmodels' in f or 'model' in f.lower()][0])")
-          echo "model image path (from IDF): $model_path"
-          cp "$model_path" ../../dist/srmodels.bin
-          test -s ../../dist/srmodels.bin || { echo "::error::srmodels.bin is empty/missing â€” offline speech would brick a web flash. Failing build."; exit 1; }
-          echo "srmodels.bin size: $(stat -c%s ../../dist/srmodels.bin) bytes"
-          # Export the exact offsets IDF used, so the manifest can't drift from
-          # the partition table.
-          # IMPORTANT: do NOT write into firmware/build â€” that dir is often
-          # root-owned after espressif/esp-idf-ci-action (Docker), which causes
-          # "offsets.env: Permission denied". Write only under dist/ (we own it).
-          python3 - <<'PY' > ../../dist/offsets.env
-          import json
-          d=json.load(open("flasher_args.json"))
-          def off_for(sub):
-              for o,f in d["flash_files"].items():
-                  if sub in f: return int(o,16)
-              return None
-          app=off_for("fox.bin"); model=off_for("srmodels")
-          if app is None or model is None:
-              raise SystemExit(f"missing offset app={app} model={model} in {d['flash_files']}")
-          print(f"APP_OFFSET={app}")
-          print(f"MODEL_OFFSET={model}")
-          PY
-          echo "=== offsets.env ==="; cat ../../dist/offsets.env
-          cd ../../dist
-          sha256sum * > SHA256SUMS
+          python3 -c "import json;d=json.load(open('$FA'));[print(f'  {o}  {f}') for o,f in sorted(d['flash_files'].items(),key=lambda x:int(x[0],16))]"
 
-      - name: Emit esp-web-tools manifests (offsets from IDF, brain from partition table)
-        run: |
-          set -e
+          # Standard images.
+          cp firmware/build/bootloader/bootloader.bin dist/
+          cp firmware/build/partition_table/partition-table.bin dist/
+          cp firmware/build/fox.bin dist/
+          cp firmware/main/data/fox_ir.bin    dist/foxdata.bin
+          cp firmware/main/data/foxbrainA.bin dist/foxbrainA.bin
+          cp firmware/main/data/foxbrainB.bin dist/foxbrainB.bin
+
+          # App + model offsets straight from IDF (can't drift from the table).
+          APP_OFFSET=$(python3 -c "import json;d=json.load(open('$FA'));print(int([o for o,f in d['flash_files'].items() if f.endswith('fox.bin')][0],16))")
+          MODEL_REL=$(python3 -c "import json;d=json.load(open('$FA'));print([f for o,f in d['flash_files'].items() if 'srmodels' in f][0])")
+          MODEL_OFFSET=$(python3 -c "import json;d=json.load(open('$FA'));print(int([o for o,f in d['flash_files'].items() if 'srmodels' in f][0],16))")
+          cp "firmware/build/$MODEL_REL" dist/srmodels.bin
+          test -s dist/srmodels.bin || { echo "::error::srmodels.bin missing/empty — offline speech would brick a web flash."; exit 1; }
+
+          # Model-size guard: the image MUST fit the 'model' partition or it would
+          # overflow into foxbrain on flash. Partition size derived from IDF too.
+          MODEL_PART_SIZE=$(python3 -c "
+          import csv
+          for row in csv.reader(open('firmware/partitions.csv')):
+              row=[c.strip() for c in row if c.strip()]
+              if row and row[0]=='model': print(int(row[4],16))
+          ")
+          MSIZE=$(stat -c%s dist/srmodels.bin)
+          echo "srmodels.bin = $MSIZE bytes; model partition = $MODEL_PART_SIZE bytes"
+          if [ "$MSIZE" -gt "$MODEL_PART_SIZE" ]; then
+            echo "::error::model image ($MSIZE) exceeds model partition ($MODEL_PART_SIZE). Grow 'model' in partitions.csv."
+            exit 1
+          fi
+
+          # foxbrain/foxdata are data partitions IDF doesn't flash; read their
+          # offsets from partitions.csv so nothing is hand-typed.
+          FOXBRAIN_OFFSET=$(python3 -c "
+          import csv
+          for row in csv.reader(open('firmware/partitions.csv')):
+              row=[c.strip() for c in row if c.strip()]
+              if row and row[0]=='foxbrain': print(int(row[3],16))
+          ")
+          FOXDATA_OFFSET=$(python3 -c "
+          import csv
+          for row in csv.reader(open('firmware/partitions.csv')):
+              row=[c.strip() for c in row if c.strip()]
+              if row and row[0]=='foxdata': print(int(row[3],16))
+          ")
+
           cd dist
-          . offsets.env
-          # foxbrain/foxdata offsets come from partitions.csv (data partitions IDF
-          # doesn't flash): keep these two in sync with partitions.csv.
-          FOXBRAIN_OFFSET=$((16#6c0000))
-          FOXDATA_OFFSET=$((16#7a0000))
+          sha256sum * > SHA256SUMS
           gen() {  # $1 = brain bin, $2 = out manifest
             cat > "$2" <<JSON
           {
@@ -205,7 +208,7 @@ jobs:
           gen foxbrainA.bin manifest.json
           gen foxbrainB.bin manifest-b.json
           echo "=== manifest.json ==="; cat manifest.json
-          echo "=== offsets used: app=$APP_OFFSET model=$MODEL_OFFSET brain=$FOXBRAIN_OFFSET foxdata=$FOXDATA_OFFSET ==="
+          echo "=== offsets: app=$APP_OFFSET model=$MODEL_OFFSET brain=$FOXBRAIN_OFFSET foxdata=$FOXDATA_OFFSET ==="
 
       - uses: actions/upload-artifact@v4
         with:

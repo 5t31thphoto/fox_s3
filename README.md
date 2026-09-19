@@ -79,9 +79,21 @@ binary.
 | M5Stack **AtomS3R** | ESP32-S3, 8MB flash, 8MB octal PSRAM, 128×128 LCD, BMI270+BMM150 IMU, IR LED on **GPIO47**, USER button on **GPIO41** |
 | **Atomic Echo Base** | ES8311 codec, mic + speaker over I2S (DIN 7 / WS 6 / DOUT 5 / BCK 8; I2C SDA 38 / SCL 39; amp via PI4IOE @0x43) |
 
-The firmware uses **M5Unified's own** mic/speaker path
-(`M5.config().external_speaker.atomic_echo = true`). It deliberately does **not**
-also start the standalone EchoBase library — two I2S drivers on one bus fight.
+### Audio path (important)
+
+**Do not** set `M5.config().external_speaker.atomic_echo = true` before
+`M5.begin()` on AtomS3R + Atomic Echo Base. That path hangs inside
+`M5.begin()` on this hardware (blank screen, no serial after
+“Returned from app_main()”).
+
+The working mic-avatar demo from M5 avoids that path. This firmware does the
+same:
+
+1. Plain `M5.begin()` → display comes up first
+2. Standalone **M5Atomic-EchoBase** library (vendored under `firmware/main/echobase/`)
+3. All mic/speaker I/O goes through `fox_audio.*`
+
+See `fox_audio.h` / `fox_audio.cpp` and the comments in `setup()`.
 
 ---
 

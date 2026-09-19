@@ -56,6 +56,10 @@ bool input_wait_yes(uint32_t ms) {
 }
 
 // ---- microphone capture -----------------------------------------------------
+// FIX: use fox_audio (EchoBase) instead of M5.Mic — same path as the working
+// mic-avatar demo. M5.Mic via atomic_echo hung M5.begin on this hardware.
+#include "fox_audio.h"
+
 // Capture while the USER button is held. Returns a PSRAM buffer of int16 mono
 // @16k; caller frees. Also drives the mouth from live level for lip-sync.
 int16_t* capture_while_held(size_t* out_n) {
@@ -63,20 +67,19 @@ int16_t* capture_while_held(size_t* out_n) {
     int16_t* buf = (int16_t*)heap_caps_malloc(cap * sizeof(int16_t),
                                               MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!buf) { *out_n = 0; return nullptr; }
-    M5.Speaker.end();
-    if (!M5.Mic.begin()) { *out_n = 0; return buf; }
+    audio_speaker_end();
+    if (!g_echo_ok) { *out_n = 0; return buf; }
     size_t n = 0; uint32_t t0 = millis();
     const size_t CH = 256;
     while (button_is_down() && n + CH < cap && millis() - t0 < PTT_MAX_MS) {
-        if (M5.Mic.record(buf + n, CH, SAMPLE_RATE)) {
-            // crude level for lip-sync
+        if (audio_record(buf + n, CH)) {
             long s = 0; for (size_t i = 0; i < CH; ++i) s += abs(buf[n + i]);
             face_set_mouth((s / (float)CH) / 8000.0f);
             n += CH;
         }
         M5.update();
     }
-    M5.Mic.end();
+    audio_mic_end();
     *out_n = n;
     return buf;
 }
@@ -88,25 +91,25 @@ int16_t* capture_vad_burst(size_t* out_n, uint32_t timeout_ms) {
     int16_t* buf = (int16_t*)heap_caps_malloc(cap * sizeof(int16_t),
                                               MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!buf) { *out_n = 0; return nullptr; }
-    M5.Speaker.end();
-    if (!M5.Mic.begin()) { *out_n = 0; return buf; }
+    audio_speaker_end();
+    if (!g_echo_ok) { *out_n = 0; return buf; }
     size_t n = 0; uint32_t t0 = millis(); uint32_t last_voice = 0;
     bool started = false;
     const size_t CH = 256;
     while (n + CH < cap) {
-        if (millis() - t0 > timeout_ms && !started) break;   // never spoke
-        if (M5.Mic.record(buf + n, CH, SAMPLE_RATE)) {
+        if (millis() - t0 > timeout_ms && !started) break;
+        if (audio_record(buf + n, CH)) {
             long s = 0; for (size_t i = 0; i < CH; ++i) s += abs(buf[n + i]);
             float lvl = (s / (float)CH);
             face_set_mouth(lvl / 8000.0f);
             if (lvl > 900) { started = true; last_voice = millis(); }
             n += CH;
-            if (started && millis() - last_voice > 900) break;  // trailing silence
+            if (started && millis() - last_voice > 900) break;
         }
         M5.update();
-        if (button_is_down()) break;  // let PTT interrupt
+        if (button_is_down()) break;
     }
-    M5.Mic.end();
+    audio_mic_end();
     *out_n = started ? n : 0;
     return buf;
 }
@@ -139,7 +142,7 @@ static bool imu_picked_up() {
 void enter_light_sleep() {
     face_caption("*curls up*");
     face_dim();
-    M5.Speaker.end(); M5.Mic.end();
+    audio_speaker_end(); audio_mic_end();
     gpio_wakeup_enable(USER_GPIO, GPIO_INTR_LOW_LEVEL);
     esp_sleep_enable_gpio_wakeup();
     esp_sleep_enable_timer_wakeup(3ULL * 1000000ULL);   // peek every 3s

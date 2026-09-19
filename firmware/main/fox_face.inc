@@ -173,13 +173,15 @@ static int16_t* s_wave = nullptr;
 static float s_lip_max = 10.0f;
 static uint32_t s_last_loud = 0;
 
+#include "fox_audio.h"
+
 static void face_lipsync_from_mic_once() {
     static constexpr size_t WAVE = 256 * 2;
     if (!s_wave) s_wave = (int16_t*)heap_caps_malloc(WAVE * sizeof(int16_t),
                                                      MALLOC_CAP_8BIT);
     if (!s_wave) return;
     uint64_t level = 0;
-    if (M5.Mic.record(s_wave, WAVE, SAMPLE_RATE)) {
+    if (g_echo_ok && audio_record(s_wave, WAVE)) {
         s_fft.exec(s_wave);
         for (size_t bx = 5; bx <= 60; ++bx) { int32_t f = s_fft.get(bx); level += (f < 0 ? -f : f); }
     }
@@ -197,8 +199,8 @@ static void face_lipsync_from_mic_once() {
 
 // Standalone "reactive puppet" app.
 void face_lipsync_mode() {
-    M5.Speaker.end();
-    if (!M5.Mic.begin()) return;
+    audio_speaker_end();
+    if (!g_echo_ok) return;
     while (true) {
         M5.update();
         if (M5.BtnA.wasClicked()) break;
@@ -206,5 +208,5 @@ void face_lipsync_mode() {
         face_draw(MOOD_HAPPY);
         delay(1);
     }
-    M5.Mic.end();
+    audio_mic_end();
 }

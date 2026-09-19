@@ -505,7 +505,7 @@ static void launch(const char* id) {
 void menu_dispatch(const char* id) {
     if      (!strcmp(id, "talk"))   { /* returns to PTT loop */ }
     else if (!strcmp(id, "conv"))   { cfg.conversation = true; speak("okay, i'm listening~"); }
-    else if (!strcmp(id, "volume")) { cfg.volume = (cfg.volume + 20) % 120; M5.Speaker.setVolume(cfg.volume); save_config(); speak("volume set"); }
+    else if (!strcmp(id, "volume")) { cfg.volume = (cfg.volume + 20) % 120; audio_set_volume(cfg.volume > 100 ? 100 : cfg.volume); save_config(); speak("volume set"); }
     else if (!strcmp(id, "voice"))  { cfg.voice_pack = (cfg.voice_pack == "chatterbox") ? "critter" : "chatterbox"; voice_begin(cfg); save_config(); speak("voice changed~"); }
     else if (!strcmp(id, "forget")) { mem_clear(); speak("okay, all forgotten"); }
     else if (!strcmp(id, "sleep"))  { speak("night night"); enter_light_sleep(); }
@@ -587,15 +587,24 @@ static void process_utterance(int16_t* audio, size_t n) {
 // ============================================================================
 //  Arduino entry points
 // ============================================================================
+// FIX: Do NOT set external_speaker.atomic_echo before M5.begin().
+// That path hangs M5.begin() on AtomS3R + Atomic Echo Base (black screen,
+// no serial after "Returned from app_main()"). The working mic-avatar demo
+// uses a plain M5.begin() for the display, then the standalone M5EchoBase
+// library for mic/speaker. We do the same — see fox_audio.cpp / fox_audio.h.
+#include "fox_audio.h"
+
 void setup() {
-    auto c = M5.config();
-    // Use M5Unified's own mic/speaker on the Echo Base; do NOT also start the
-    // EchoBase library or the two I2S drivers fight over the bus.
-    c.external_speaker.atomic_echo = true;
-    M5.begin(c);
+    // Serial first so we always see progress even if later init stalls.
     Serial.begin(115200);
-    delay(50);
-    Serial.println("FOX: boot");
+    delay(200);
+    Serial.println("FOX: pre-M5");
+
+    auto c = M5.config();
+    c.serial_baudrate = 115200;
+    // Do NOT enable atomic_echo — it was the blank-screen root cause.
+    M5.begin(c);
+    Serial.println("FOX: post-M5");
 
     // Bring the DISPLAY UP FIRST, before any heavy init, so the screen is never
     // black-with-no-explanation. If something below is slow or crashes, at least
@@ -608,7 +617,12 @@ void setup() {
     M5.Display.drawString("fox waking up...", 64, 64);
     Serial.println("FOX: display up");
 
-    M5.Speaker.setVolume(cfg.volume);
+    // Echo Base audio via standalone library (same path as the working demo).
+    if (!audio_begin(cfg.volume)) {
+        M5.Display.drawString("audio fail", 64, 90);
+        Serial.println("FOX: audio begin failed — continuing without sound");
+    }
+
     setenv("TZ", cfg.timezone.c_str(), 1); tzset();
 
     // Each of these is wrapped so a single subsystem failure can't blackscreen

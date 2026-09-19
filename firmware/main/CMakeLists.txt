@@ -1,6 +1,12 @@
 # One Arduino-as-component IDF app. Every .cpp/.c is a source; the .inc files
 # are #included by fox_main.cpp / fox_llm.cpp / fox_face.inc and must NOT be
 # listed here.
+#
+# FIX (blank screen / no sound): we vendor the official M5Atomic-EchoBase
+# library and drive the ES8311 ourselves. Relying on
+# M5.config().external_speaker.atomic_echo caused M5.begin() to hang on the
+# AtomS3R + Atomic Echo Base, so the display never came up. The working
+# mic-avatar demo uses this same standalone path.
 idf_component_register(
     SRCS
         "fox_main.cpp"
@@ -9,7 +15,10 @@ idf_component_register(
         "fox_memory.cpp"
         "fox_llm.cpp"
         "fox_sam.c"
-    INCLUDE_DIRS "."
+        "fox_audio.cpp"
+        "echobase/M5EchoBase.cpp"
+        "echobase/es8311.cpp"
+    INCLUDE_DIRS "." "echobase"
 )
 
 # Our style uses some compact one-liners and cross-TU helpers that the IDF

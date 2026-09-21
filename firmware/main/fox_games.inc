@@ -9,13 +9,24 @@
 extern M5Canvas* face_canvas;
 extern FoxConfig cfg;
 
-// Single click belongs to the game. Double click is the universal escape/menu.
-static ButtonEvent game_button() {
-    return input_button_event();
+// Ignore the click that *started* the game (still latched in M5.BtnA).
+static bool game_btn_exit(uint32_t started_ms) {
+    if (millis() - started_ms < 450) {
+        // drain so wasClicked/wasDoubleClicked go false
+        (void)M5.BtnA.wasClicked();
+        (void)M5.BtnA.wasDoubleClicked();
+        return false;
+    }
+    if (M5.BtnA.wasDoubleClicked()) { g_goto_menu = true; return true; }
+    return false;
 }
 
+// small tilt reader: returns roll/pitch in ~[-1,1]
 void tilt_xy(float* rx, float* ry) {
-    if (!imu_tilt(rx, ry)) { *rx = *ry = 0; }
+    float ax, ay, az;
+    M5.Imu.getAccel(&ax, &ay, &az);
+    *rx = constrain(ay, -1.f, 1.f);
+    *ry = constrain(ax, -1.f, 1.f);
 }
 
 // ===========================================================================
@@ -24,7 +35,7 @@ void tilt_xy(float* rx, float* ry) {
 void game_wormhole() {
     uint32_t t_start = millis();
     speak("hold tight, into the wormhole!");
-    face_caption("tilt to steer — click to exit");
+    face_caption("tilt to steer — double click exits");
     float ship_x = 64, ship_y = 100;
     int score = 0, lives = 3;
     // tunnel rings: z grows toward camera
@@ -39,7 +50,7 @@ void game_wormhole() {
     uint32_t last = millis();
     while (lives > 0 && millis() - t_start < 90000) {
         M5.update();
-        { ButtonEvent bev = game_button(); if (bev == BTN_DOUBLE) { g_goto_menu = true; break; } if (bev == BTN_TAP) { for (int j=0;j<NR;++j) rings[j].z += 5.0f; } }
+        if (game_btn_exit(t_start)) break;
         float rx, ry; tilt_xy(&rx, &ry);
         ship_x = constrain(ship_x + rx * 5.5f, 12, 116);
         ship_y = constrain(ship_y + ry * 5.5f, 40, 118);
@@ -102,7 +113,7 @@ void game_catch() {
     uint32_t t0 = millis();
     while (misses < 5) {
         M5.update();
-        { ButtonEvent bev = game_button(); if (bev == BTN_DOUBLE) { g_goto_menu = true; break; } if (bev == BTN_TAP) { for(int j=0;j<ND;++j) if(fabsf(drops[j].x-basket)<24) drops[j].v *= 0.45f; } }
+        if (game_btn_exit(t_start)) break;
         float rx, ry; tilt_xy(&rx, &ry);
         basket = constrain(basket + rx * 8, 12, 116);
         face_canvas->fillSprite(cfg.color_bg);
@@ -137,24 +148,22 @@ void game_catch() {
 //  REACTION — wait for the flash, then tap. Measures your reflex.
 // ===========================================================================
 void game_reaction() {
-    speak("wait for green, then click fast!");
-    face_canvas->fillSprite(0xF800); face_canvas->setTextColor(0xFFFF);
-    face_canvas->setTextDatum(middle_center); face_canvas->drawString("WAIT", 64, 64); face_canvas->pushSprite(0, 0);
+    speak("wait for green, then tap fast!");
+    face_canvas->fillSprite(0xF800); face_canvas->pushSprite(0, 0);   // red
     delay(random(1200, 3500));
-    face_canvas->fillSprite(0x07E0); face_canvas->drawString("CLICK!", 64, 64); face_canvas->pushSprite(0, 0);
+    face_canvas->fillSprite(0x07E0); face_canvas->pushSprite(0, 0);   // green
     uint32_t t0 = millis();
     while (millis() - t0 < 2000) {
         M5.update();
-        ButtonEvent ev = game_button();
-        if (ev == BTN_DOUBLE) { g_goto_menu = true; return; }
-        if (ev == BTN_TAP) { speak(String("whoa, ") + (millis() - t0) + " ms!"); return; }
+        if (M5.BtnA.wasClicked()) { speak(String("whoa, ") + (millis() - t0) + " ms!"); return; }
     }
     speak("too slow~ try again sometime");
 }
 
+// guess-my-paw (kept from before, quick fidget)
 void game_guess_paw() {
     int paw = esp_random() & 1;
-    speak(paw ? "left or right paw? click for right~" : "left or right paw? click for left~");
+    speak(paw ? "left or right paw? tap for right~" : "left or right paw? tap for left~");
     bool tapped = input_wait_yes(2200);
     speak(tapped ? "hehe you got me!" : "missed! again sometime~");
 }

@@ -52,9 +52,9 @@ void ir_narrow_power();
 float imu_heading_deg();
 void  tool_menu_ble_radar();
 void  tool_menu_wifi_radar();
-void  tool_radio_release();
 void  tool_menu_sniffer();
 void  tool_menu_probe_sniff();
+void  tool_radio_release();
 const char* tool_ble_scan_report();
 const char* tool_wifi_scan_report();
 
@@ -93,7 +93,7 @@ String net_space_weather();
 String net_aurora();
 
 // ---- input: buttons / capture / menu / sleep (fox_input.inc) ---------------
-enum ButtonEvent : uint8_t { BTN_NONE, BTN_TAP, BTN_DOUBLE, BTN_HOLD_START };
+enum ButtonEvent : uint8_t { BTN_NONE, BTN_TAP, BTN_HOLD_START };
 enum Gesture     : uint8_t { GST_NONE, GST_TAP, GST_SHAKE, GST_TILT };
 void        input_begin();
 void        input_poll();
@@ -104,9 +104,8 @@ int16_t*    capture_while_held(size_t* out_n);
 int16_t*    capture_vad_burst(size_t* out_n, uint32_t timeout_ms);
 void        enter_light_sleep();
 void        open_menu();
+void        open_settings();
 void        volume_adjust();
-bool        imu_tilt(float* rx, float* ry);
-bool        imu_rotation_dps(float* gx, float* gy, float* gz);
 
 // ---- host glue defined in fox_main.cpp, used by the .inc modules -----------
 void speak(const String& fact);

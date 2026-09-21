@@ -40,11 +40,7 @@ struct Header {
     int32_t  reserved[6];
 };
 
-struct QTensor {
-    const uint8_t* q;      // raw quantised bytes; int8 or packed int4
-    const float* s;        // fp32 group scales for legacy Q8
-    const uint16_t* s16;   // fp16 group scales for packed Q4
-};  // points into mmap
+struct QTensor { const uint8_t* q; const float* s; const uint16_t* s16; };  // points into mmap
 
 struct Model {
     Header h{};
@@ -81,9 +77,11 @@ bool load_model() {
     M.base = (const uint8_t*)ptr;
     memcpy(&M.h, M.base, sizeof(Header));
     if (memcmp(M.h.magic, "FOXB", 4) != 0 || M.h.version != 1) return false;
-    if (M.h.reserved[0] != 0 && M.h.reserved[0] != 4 && M.h.reserved[0] != 8) return false;
     if (M.h.dim <= 0 || M.h.dim > 512 || M.h.n_layers <= 0 || M.h.n_layers > 12)
         return false;
+    if (M.h.reserved[0] != 0 && M.h.reserved[0] != 4) return false;
+    if (M.h.group_size <= 0 || (M.h.dim % M.h.group_size) != 0 ||
+        (M.h.hidden % M.h.group_size) != 0) return false;
 
     // Allocate runtime state in PSRAM.
     auto alloc = [](int n) {
@@ -130,7 +128,7 @@ String llm_flavour(const String& fact, FoxMood mood, const FoxConfig& cfg) {
     static const char* MTAG[] = {"[sleepy]", "[calm]", "[happy]", "[excited]", "[grumpy]"};
     String prompt = String(MTAG[mood]) + " " + fact + " ->";
 
-    String out = llm_generate(prompt, /*max_new=*/16, /*temp=*/0.35f);
+    String out = llm_generate(prompt, /*max_new=*/16, /*temp=*/0.7f);
     if (out.length() < 2) return "";
 
     // Safety gate: the continuation must still reference the fact so the model

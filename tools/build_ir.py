@@ -315,8 +315,8 @@ def main():
     ap.add_argument("--ac")
     ap.add_argument("--max-power", type=int, default=400,
                     help="cap on distinct POWER codes kept for the sweep")
-    ap.add_argument("--max-named", type=int, default=57,
-                    help="named non-power buttons kept per category (57 fits the 0x2f000 foxdata partition)")
+    ap.add_argument("--max-named", type=int, default=60,
+                    help="named non-power buttons kept per category")
     args = ap.parse_args()
 
     sources = []

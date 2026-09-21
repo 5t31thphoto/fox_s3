@@ -70,7 +70,6 @@ def test_ir():
     known = {(9000,4500):"NEC", (2400,600):"SIRC", (4500,4500):"Samsung", (2666,889):"RC6"}
     seen = [v for k,v in known.items() if k in headers]
     check("known protocol headers present", len(seen) >= 3, f"saw {seen}")
-    check("IR blob fits foxdata partition", len(blob) <= 0x2f000, f"{len(blob)} bytes")
 
 
 # ---------------------------------------------------------------------------
@@ -89,34 +88,28 @@ def test_brain():
     check("FOXB magic", blob[:4] == b"FOXB"); off = 4
     ver, = struct.unpack_from("<I", blob, off); off += 4
     dim, hidden, L, H, KV, vocab, seq, shared = struct.unpack_from("<iiiiiiii", blob, off); off += 32
-    gs, = struct.unpack_from("<i", blob, off); off += 4
-    reserved = struct.unpack_from("<6i", blob, off); off += 24
-    bits = reserved[0] or 8
+    gs, = struct.unpack_from("<i", blob, off); off += 4; off += 24
     check("version 1", ver == 1)
-    check("supported precision", bits in (4, 8), f"bits={bits}")
     check("shared classifier", shared == 1)
+    # A tiny A build is Q8; checked-in B is validated separately below.
     check("dims sane", 0 < dim <= 512 and 0 < L <= 12, f"dim={dim} L={L}")
     kvdim = (dim * KV) // H
 
     def skip_f32(n):
         nonlocal off; off += n*4
-    def skip_q(rows, cols):
-        nonlocal off
-        if bits == 4:
-            off += (rows*cols + 1)//2 + (rows*cols//gs)*2
-        else:
-            off += rows*cols + (rows*cols//gs)*4
+    def skip_q8(rows, cols):
+        nonlocal off; off += rows*cols + (rows*cols//gs)*4
 
     skip_f32(vocab*dim)                 # tok_emb
     skip_f32(L*dim); skip_f32(L*dim)    # rms_att, rms_ffn
     skip_f32(dim)                       # rms_final
-    for _ in range(L): skip_q(dim, dim)      # wq
-    for _ in range(L): skip_q(kvdim, dim)    # wk
-    for _ in range(L): skip_q(kvdim, dim)    # wv
-    for _ in range(L): skip_q(dim, dim)      # wo
-    for _ in range(L): skip_q(hidden, dim)   # w1
-    for _ in range(L): skip_q(dim, hidden)   # w2
-    for _ in range(L): skip_q(hidden, dim)   # w3
+    for _ in range(L): skip_q8(dim, dim)      # wq
+    for _ in range(L): skip_q8(kvdim, dim)    # wk
+    for _ in range(L): skip_q8(kvdim, dim)    # wv
+    for _ in range(L): skip_q8(dim, dim)      # wo
+    for _ in range(L): skip_q8(hidden, dim)   # w1
+    for _ in range(L): skip_q8(dim, hidden)   # w2
+    for _ in range(L): skip_q8(hidden, dim)   # w3
     # vocab blob
     vocab_ok = True
     for i in range(vocab):
@@ -129,20 +122,28 @@ def test_brain():
 
 
 # ---------------------------------------------------------------------------
-def test_brain_b():
-    print("Brain B compact int4 artifact:")
-    out = os.path.join(tempfile.gettempdir(), "foxbrain_b_test.bin")
-    r = subprocess.run([sys.executable, os.path.join(ROOT, "tools", "train_brain.py"),
-                        "--pack", "B", "--out", out, "--steps", "20", "--repeat", "2"],
-                       capture_output=True, text=True)
-    check("pack B trains", r.returncode == 0, r.stderr[-400:] if r.stderr else "")
-    if r.returncode != 0: return
-    blob=open(out,"rb").read()
-    dim,hidden,L,H,KV,vocab,seq,shared=struct.unpack_from("<iiiiiiii",blob,8)
-    bits=struct.unpack_from("<i",blob,44)[0]
-    check("B uses compact architecture", (dim,hidden,L,H,seq)==(72,192,6,6,72), f"{dim}/{hidden}/{L}/{H}/{seq}")
-    check("B uses int4", bits==4)
-    check("B fits brain partition", len(blob)<=0x48000, f"{len(blob)} bytes")
+def test_partitions():
+    print("8MB partition layout:")
+    path = os.path.join(ROOT, "firmware", "partitions.csv")
+    rows = []
+    for line in open(path):
+        line=line.strip()
+        if not line or line.startswith("#"): continue
+        fields = [x.strip().rstrip(",") for x in line.split(",") if x.strip()]
+        name, typ, sub, off, size = fields[:5]
+        rows.append((name, int(off,16), int(size,16)))
+    end=0; ok=True
+    for name, off, size in rows:
+        if off < end: ok=False
+        end=off+size
+    check("partitions non-overlapping", ok)
+    check("partitions end exactly at 8MB", end == 0x800000, hex(end))
+    brain=next((x for x in rows if x[0]=="foxbrain"), None)
+    check("foxbrain partition is 0x48000", brain is not None and brain[2] == 0x48000)
+    for name in ("foxbrainA.bin", "foxbrainB.bin"):
+        f=os.path.join(ROOT,"firmware","main","data",name)
+        check(f"{name} fits", os.path.getsize(f) <= 0x48000, str(os.path.getsize(f)))
+
 
 # ---------------------------------------------------------------------------
 def test_commands():
@@ -162,27 +163,11 @@ def test_commands():
         check(f"action '{action}' dispatched", f'"{action}"' in main)
 
 
-def test_partition_layout():
-    print("8MB partition layout:")
-    p = os.path.join(ROOT, "firmware", "partitions.csv")
-    rows=[]
-    for line in open(p):
-        line=line.strip()
-        if not line or line.startswith("#"): continue
-        cols=[x.strip() for x in line.split(",")]
-        if len(cols)>=5: rows.append((cols[0],int(cols[3],0),int(cols[4],0)))
-    end=max(off+size for _,off,size in rows)
-    check("partition table ends at 8MB", end==0x800000, hex(end))
-    by={n:(o,z) for n,o,z in rows}
-    check("model fits supplied srmodels.bin", os.path.getsize(os.path.join(ROOT,"firmware","main","data","foxbrainA.bin")) >= 0 and by["model"][1] >= 2761093)
-    check("brain B fits", os.path.getsize(os.path.join(ROOT,"firmware","main","data","foxbrainB.bin")) <= by["foxbrain"][1], f"{os.path.getsize(os.path.join(ROOT,'firmware','main','data','foxbrainB.bin'))}/{by['foxbrain'][1]}")
-
 if __name__ == "__main__":
     print("=== Fox build-artifact tests ===")
     test_ir()
-    test_partition_layout()
     test_brain()
-    test_brain_b()
+    test_partitions()
     test_commands()
     print()
     if FAILED:

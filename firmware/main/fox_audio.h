@@ -34,8 +34,6 @@ void audio_mic_end();
 // Record int16 mono @ 16 kHz into buf. Returns true on success.
 // size_samples is number of int16 samples (not bytes).
 bool audio_record(int16_t* buf, size_t size_samples);
-// Short microphone level sample, normalized 0..1 for reactive toys.
-float audio_level_rms();
 
 // Play int16 mono PCM. sample_rate is typically 16000 or 22050.
 // Blocks until the chunk has been written (EchoBase play is synchronous-ish).

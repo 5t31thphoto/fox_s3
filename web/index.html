@@ -138,20 +138,20 @@
   <!-- STEP 1: pick a brain pack -->
   <section class="step">
     <h2><span class="pip">1</span>Pick a voice &amp; brain</h2>
-    <p class="sub" style="margin-bottom:4px">Both ship on the chip. You can switch
-    later from the fox's own menu, but pick a starting personality.</p>
+    <p class="sub" style="margin-bottom:4px">Choose the offline brain + voice build to flash. The voice can be changed later from
+    Fox's menu; changing the brain requires reflashing the other pack.</p>
     <div class="packs" id="packs">
       <div class="pack on" data-pack="A">
         <div class="nm">Chatterbox</div>
-        <div class="vo">clear speech · ~200K brain</div>
+        <div class="vo">clear speech · compact brain</div>
         <p class="ds">Speaks in real words (PicoTTS), tuned a little higher to sound
         small and cute. The friendlier out-of-the-box choice.</p>
         <div class="pick">◆ selected</div>
       </div>
       <div class="pack" data-pack="B">
         <div class="nm">Critter</div>
-        <div class="vo">retro synth · ~700K brain</div>
-        <p class="ds">A chirpy formant voice with a bigger on-device brain. More
+        <div class="vo">retro SAM · larger brain</div>
+        <p class="ds">A retro SAM voice with a bigger on-device brain. More
         creature than narrator — charming, a touch harder to parse.</p>
         <div class="pick">◆ selected</div>
       </div>
@@ -377,7 +377,7 @@
       ssid:val('ssid'), pass:val('pass'), weather:val('weather'),
       key:val('key'), chat_model:val('cmodel'), api_base:val('abase'),
       mode:document.getElementById('mode').value,
-      voice: pack==='A' ? 'chatterbox' : 'chatterbox',
+      voice: pack==='A' ? 'chatterbox' : 'critter',
       volume:parseInt(val('volume'),10),
       splash: document.getElementById('splash').value,
       splash_fx: fx,

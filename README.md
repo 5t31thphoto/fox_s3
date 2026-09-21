@@ -1,13 +1,13 @@
 # 🦊 Fox Voice Companion
 
-A cute, fidgety fox companion that lives on an **M5Stack AtomS3R** with an
+A cute, fidgety anime-fox companion that lives on an **M5Stack AtomS3R** with an
 **Atomic Echo Base**. It listens, talks, makes faces, remembers you, blasts IR at
 your TV, and plays games — **entirely offline by default**. If you give it
 wifi and a free API key, it grows an online brain too. But the online part is a
 *bonus*, never a requirement.
 
 There is **no wake word**. You talk to the fox by holding its button
-(push-to-talk). A quick tap opens its menu. It can also enter a hands-free
+(push-to-talk). A quick tap belongs to the foreground app/character; a double tap opens its menu. It can also enter a hands-free
 "conversation mode" that listens for a while and times out on silence.
 
 ---
@@ -24,7 +24,7 @@ aurora tonight?", "play wormhole").
 
 **Flipper-style hacker tools.**
 - **BLE radar** — rotate the device and nearby Bluetooth devices plot around a
-  sweep by bearing (IMU magnetometer), blip radius ~ signal strength.
+  rotational RSSI sweep: follow the red target needle with the green IMU needle; sources are plotted relative to Fox.
 - **WiFi radar** — same, for access points.
 - **Passive packet sniffer** — a receive-only channel hopper with a live
   mgmt/data/ctrl frame scope. Transmits nothing.
@@ -113,22 +113,24 @@ app plus the data partitions at the offsets in `firmware/partitions.csv`.
 
 ---
 
-## Brain packs (swappable at flash time)
+## Brain packs (alternative offline builds)
 
 | Pack | Voice | On-device brain | Feel |
 |------|-------|-----------------|------|
-| **A — Chatterbox** (default) | PicoTTS, pitched up | ~200K params | Speaks clear words; friendliest default |
-| **B — Critter** | procedural formant synth | ~700K params | Chirpy little creature; more character |
+| **A — Chatterbox** (default) | PicoTTS, pitched up | 64d / 160h / 4-layer int8 | Clear speech; friendliest default |
+| **B — Critter** | SAM retro voice | 72d / 192h / 6-layer packed int4 | More cognitive room; chirpy retro voice |
 
-Both are flashed; you can switch from the fox's on-device menu. Captions show
-either way.
+A and B use the same Fox character/world and the same firmware. They are
+alternative flash builds because the AtomS3R's 8MB layout has one offline-brain
+slot. Online chat is a further, much larger brain rather than a different
+character.
 
 ---
 
 ## The on-device brain, honestly
 
 The brain is a real llama-style transformer (RMSNorm + RoPE + attention +
-SwiGLU, int8 weights) trained **from scratch in pure numpy** — no PyTorch — by
+SwiGLU, compact quantised weights) trained **from scratch in pure numpy** — no PyTorch — by
 `tools/train_brain.py`, so it builds on a plain CI runner in ~20–30 s. It reaches
 cross-entropy ~0.2 and generates lines like:
 

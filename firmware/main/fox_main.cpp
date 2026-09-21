@@ -6,7 +6,7 @@
 //
 // Interaction model (per the owner's emphatic instructions):
 //   * PUSH-TO-TALK ONLY. Hold the USER button to talk; release to process.
-//     A single click belongs to the current screen; only a double click opens the menu.
+//     There is NO wake word. A short tap is delivered to the foreground character/app; double-click opens the menu.
 //   * "Conversation mode" is opt-in from the menu (or by asking the fox). In
 //     that mode it keeps listening for a while and times out on silence.
 //
@@ -285,6 +285,7 @@ static int recognize_offline(int16_t* audio, size_t samples) {
 //  Cloud (optional). OpenAI-compatible chat + Whisper transcription.
 // ============================================================================
 bool wifi_connect() {
+    if (!cfg.wifi_enabled) return false;
     if (WiFi.status() == WL_CONNECTED) return true;
     if (cfg.wifi_ssid.isEmpty()) return false;
     WiFi.mode(WIFI_STA);
@@ -311,8 +312,8 @@ static String fox_system_prompt() {
 // These mirror the original llm_client.c tool surface (ble/wifi/ir/imu) and add
 // the space-weather report. Report-only: no long-running UI here.
 static String run_tool(const String& name, JsonVariantConst args) {
-    if (name == "ble_scan")   return String(tool_ble_scan_report());
-    if (name == "wifi_scan")  return String(tool_wifi_scan_report());
+    if (name == "ble_scan") { String r = tool_ble_scan_report(); tool_radio_release(); return r; }
+    if (name == "wifi_scan") { String r = tool_wifi_scan_report(); tool_radio_release(); return r; }
     if (name == "space_weather") return net_space_weather();
     if (name == "weather")    return net_weather();
     if (name == "tv_power")   { ir_command("tv", "power"); return "{\"ok\":true}"; }
@@ -330,8 +331,8 @@ static void add_tools(JsonDocument& q) {
         JsonObject p = f["parameters"].to<JsonObject>();
         p["type"] = "object"; p["properties"].to<JsonObject>();
     };
-    if (cfg.tool_ble)  fn("ble_scan",  "Scan for nearby Bluetooth LE devices; returns count and closest.");
-    if (cfg.tool_wifi) fn("wifi_scan", "Scan for nearby WiFi access points; returns count and strongest.");
+    if (cfg.ble_enabled && cfg.tool_ble)  fn("ble_scan",  "Scan for nearby Bluetooth LE devices; returns count and closest.");
+    if (cfg.wifi_enabled && cfg.tool_wifi) fn("wifi_scan", "Scan for nearby WiFi access points; returns count and strongest.");
     fn("space_weather", "Get the current NOAA planetary Kp index and whether auroras are likely.");
     fn("weather", "Get the local weather for the configured location.");
     if (cfg.tool_ir)   fn("tv_power", "Send the learned TV power IR code (toggle the TV on/off).");
@@ -349,6 +350,8 @@ static String cloud_chat(const String& user_text) {
     { JsonObject u = msgs.add<JsonObject>(); u["role"] = "user"; u["content"] = user_text; }
 
     for (int round = 0; round < 2; ++round) {
+        // A tool may have released the radio between model/tool turns.
+        if (!wifi_connect()) return "";
         WiFiClientSecure client; client.setInsecure();
         HTTPClient h;
         if (!h.begin(client, cfg.api_base + "/chat/completions")) return "";
@@ -480,9 +483,9 @@ void speak(const String& fact) {
 // these whether you asked out loud or picked it from the menu.
 static void launch(const char* id) {
     needs_interact(needs, true);
-    if      (!strcmp(id, "ble_radar"))  { if (cfg.tool_ble)  tool_menu_ble_radar();  else speak("ble is switched off"); }
-    else if (!strcmp(id, "wifi_radar")) { if (cfg.tool_wifi) tool_menu_wifi_radar(); else speak("wifi is switched off"); }
-    else if (!strcmp(id, "sniffer"))    { if (cfg.tool_wifi) tool_menu_sniffer();    else speak("wifi is switched off"); }
+    if      (!strcmp(id, "ble_radar"))  { if (cfg.ble_enabled && cfg.tool_ble)  tool_menu_ble_radar();  else speak("ble is switched off"); }
+    else if (!strcmp(id, "wifi_radar")) { if (cfg.wifi_enabled && cfg.tool_wifi) tool_menu_wifi_radar(); else speak("wifi is switched off"); }
+    else if (!strcmp(id, "sniffer"))    { if (cfg.wifi_enabled && cfg.tool_wifi) tool_menu_sniffer();    else speak("wifi is switched off"); }
     else if (!strcmp(id, "wormhole"))   game_wormhole();
     else if (!strcmp(id, "catch"))      game_catch();
     else if (!strcmp(id, "twentyq"))    game_bayes_twenty();
@@ -497,7 +500,7 @@ static void launch(const char* id) {
     else if (!strcmp(id, "starfield"))  toy_starfield();
     else if (!strcmp(id, "ink"))        toy_ink();
     else if (!strcmp(id, "spiro"))      toy_spiro();
-    else if (!strcmp(id, "probes"))     { if (cfg.tool_wifi) tool_menu_probe_sniff(); else speak("wifi is switched off"); }
+    else if (!strcmp(id, "probes"))     { if (cfg.wifi_enabled && cfg.tool_wifi) tool_menu_probe_sniff(); else speak("wifi is switched off"); }
     else if (!strcmp(id, "lipsync"))    face_lipsync_mode();
     else if (!strcmp(id, "learn_tv"))   ir_narrow_power();
     else if (!strcmp(id, "weather"))    speak(net_weather());
@@ -509,6 +512,7 @@ static void launch(const char* id) {
 void menu_dispatch(const char* id) {
     if      (!strcmp(id, "talk"))   { /* returns to PTT loop */ }
     else if (!strcmp(id, "conv"))   { cfg.conversation = true; speak("okay, i'm listening~"); }
+    else if (!strcmp(id, "settings")) { open_settings(); }
     else if (!strcmp(id, "volume")) { volume_adjust(); }
     else if (!strcmp(id, "voice"))  { cfg.voice_pack = (cfg.voice_pack == "chatterbox") ? "critter" : "chatterbox"; voice_begin(cfg); save_config(); speak("voice changed~"); }
     else if (!strcmp(id, "forget")) { mem_clear(); speak("okay, all forgotten"); }
@@ -732,27 +736,31 @@ void loop() {
 
     uint32_t now = millis();
 
-    // --- Button semantics ---------------------------------------------------
-    // A single click NEVER opens the menu. It is deliberately available to the
-    // current app/game. Double click is the one universal menu gesture.
-    ButtonEvent ev = input_button_event();
-    if (ev == BTN_DOUBLE) {
+    // --- Push-to-talk + double-click-to-menu ------------------------------
+    // Double-click opens the menu from anywhere (M5 detects it for us).
+    if (M5.BtnA.wasDoubleClicked()) {
         open_menu();
         last_activity = now;
-    } else if (ev == BTN_HOLD_START) {
-        face_listen();
-        size_t n = 0;
-        int16_t* audio = capture_while_held(&n);
-        face_think();
-        if (audio && n > SAMPLE_RATE / 3) process_utterance(audio, n);
-        if (audio) heap_caps_free(audio);
-        last_activity = now;
-    } else if (ev == BTN_TAP) {
-        // Outside an app, a single click is simply a little fox interaction.
-        needs_interact(needs, false);
-        face_set_mouth(0.55f);
-        face_caption("boop!");
-        last_activity = now;
+    } else {
+        ButtonEvent ev = input_button_event();
+        if (ev == BTN_HOLD_START) {
+            face_listen();
+            size_t n = 0;
+            int16_t* audio = capture_while_held(&n);   // returns on release / max
+            face_think();
+            if (audio && n > SAMPLE_RATE / 3) process_utterance(audio, n);
+            if (audio) heap_caps_free(audio);
+            last_activity = now;
+        } else if (ev == BTN_TAP) {
+            // A single click belongs to the foreground character/app. It must
+            // never summon or eject to the menu. Double-click is the universal
+            // menu gesture; apps consume taps themselves when appropriate.
+            face_set_mouth(0.18f);
+            face_draw(fox_mood(needs));
+            audio_tone(520, 35);
+            face_set_mouth(0.0f);
+            last_activity = now;
+        }
     }
 
     // If a game/tool/toy asked to bail to the menu (double-click), do it now.

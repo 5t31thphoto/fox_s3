@@ -262,6 +262,51 @@ static int sample_temp(float* logits, int n, float temp) {
     return n - 1;
 }
 
+// Constrained FOXESE tail generation.  The model chooses only the three
+// semantic nibbles; firmware supplies the immutable version/mood/fact fields.
+// This keeps the neural output compact while making malformed packets impossible.
+static int token_for_piece(const char* piece) {
+    for (int i = 0; i < V.size; ++i)
+        if (!strcmp(V.tok[i], piece)) return i;
+    return -1;
+}
+
+static int pick_hex04(const float* logits) {
+    int best = -1; float bv = -INFINITY;
+    for (int d = 0; d < 4; ++d) {
+        char c[2] = { char('0' + d), 0 };
+        int id = token_for_piece(c);
+        if (id >= 0 && logits[id] > bv) { bv = logits[id]; best = id; }
+    }
+    return best;
+}
+
+static String llm_foxese_tail(const String& prompt) {
+    if (!M.ready) return "";
+    resolve_weights();
+    int cap = M.h.seq_len;
+    int* toks = (int*)malloc(sizeof(int) * cap);
+    if (!toks) return "";
+    int n = encode(prompt, toks, cap);
+    if (n == 0 || n >= cap - 6) { free(toks); return ""; }
+
+    int pos = 0, token = toks[0];
+    for (; pos < n - 1; ++pos) { forward(token, pos); token = toks[pos + 1]; }
+    String out;
+    const char* fixed[] = {"S", nullptr, "G", nullptr, "E", nullptr};
+    for (int k = 0; k < 6; ++k) {
+        const float* logits = forward(token, pos);
+        int next = -1;
+        if ((k & 1) == 0) next = token_for_piece(fixed[k]);
+        else next = pick_hex04(logits);
+        if (next < 0) { free(toks); return ""; }
+        const char* piece = V.tok[next];
+        out += piece; token = next; ++pos;
+    }
+    free(toks);
+    return out;
+}
+
 // Generate a short continuation of `prompt`. Stops on newline token or budget.
 static String llm_generate(const String& prompt, int max_new, float temp) {
     if (!M.ready) return "";

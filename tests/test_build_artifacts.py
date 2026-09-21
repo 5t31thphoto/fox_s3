@@ -121,6 +121,19 @@ def test_brain():
 
 
 # ---------------------------------------------------------------------------
+def test_foxese():
+    print("FOXESE semantic IR contract:")
+    src = open(os.path.join(ROOT, "firmware", "main", "foxese.cpp")).read()
+    trainer = open(os.path.join(ROOT, "tools", "train_brain.py")).read()
+    check("FOXESE packet shape is fixed", "s.length() != 13" in src)
+    check("FOXESE has version/mood/fact/style/gesture/intensity",
+          all(x in src for x in ["version", "mood", "fact_id", "style", "gesture", "intensity"]))
+    check("trainer emits semantic tail", "S{style:X}G{gesture:X}E{intensity:X}" in trainer)
+    check("firmware constructs immutable packet", "foxese_encode((uint8_t)mood, fid" in open(os.path.join(ROOT, "firmware", "main", "fox_llm.cpp")).read())
+    check("model output is constrained", "llm_foxese_tail" in open(os.path.join(ROOT, "firmware", "main", "fox_llm_forward.inc")).read())
+
+
+# ---------------------------------------------------------------------------
 def test_commands():
     print("MultiNet command registry:")
     main = open(os.path.join(ROOT, "firmware", "main", "fox_main.cpp")).read()
@@ -142,6 +155,7 @@ if __name__ == "__main__":
     print("=== Fox build-artifact tests ===")
     test_ir()
     test_brain()
+    test_foxese()
     test_commands()
     print()
     if FAILED:

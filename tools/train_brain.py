@@ -37,22 +37,20 @@ FACTS = [
     "let us play", "i missed you", "all done", "ready to go",
 ]
 
+# FOXESE is the on-device semantic IR.  The transformer does NOT generate
+# prose anymore: it emits a compact, printable semantic packet.  Firmware
+# expands that packet into speech/animation and keeps the original fact text.
+# Packet: F1 M<0..4> F<00..FF> S<0..3> G<0..3> E<0..3>\n#   M mood, F fact reference, S delivery style, G gesture, E intensity.
 STYLE = {
-    "sleepy":  ["{f}... *yawn*", "mm {f}...", "{f}, so sleepy", "{f} *nods off*"],
-    "calm":    ["{f}.", "okay {f}", "{f}, nice", "sure, {f}"],
-    "happy":   ["ooh {f}~", "yay {f}!", "{f} ^^", "hehe {f}!"],
-    "excited": ["{f}!! hehe", "{f}! wag!", "ooh ooh {f}!", "{f}!! yay!"],
-    "grumpy":  ["{f}. hmph.", "fine {f}.", "*flicks tail* {f}", "{f}. whatever."],
+    "sleepy":  [0, 1, 2, 3],
+    "calm":    [0, 1, 2, 3],
+    "happy":   [0, 1, 2, 3],
+    "excited": [0, 1, 2, 3],
+    "grumpy":  [0, 1, 2, 3],
 }
 
-
-def build_corpus(repeat):
-    lines = []
-    for f in FACTS:
-        for m in MOODS:
-            for t in STYLE[m]:
-                lines.append(f"[{m}] {f} -> {t.format(f=f)}\n")
-    return "".join(lines * repeat)
+MOOD_ID = {m:i for i,m in enumerate(MOODS)}
+FACT_ID = {f:i for i,f in enumerate(FACTS)}
 
 
 def build_vocab(text):
@@ -60,6 +58,25 @@ def build_vocab(text):
     stoi = {b: i for i, b in enumerate(used)}
     itos = [bytes([b]) for b in used]
     return itos, stoi
+
+
+def build_corpus(repeat):
+    lines = []
+    for f in FACTS:
+        fid = FACT_ID[f]
+        for m in MOODS:
+            mid = MOOD_ID[m]
+            for style in STYLE[m]:
+                # Gesture and intensity are semantic outputs, not text.  The
+                # mapping is deliberately simple enough for a tiny model to
+                # learn while leaving the firmware free to expand it.
+                gesture = (style + mid) & 3
+                intensity = min(3, (mid + style) // 2)
+                packet = f"S{style:X}G{gesture:X}E{intensity:X}\n"
+                # Input remains ordinary text so the tiny brain learns the
+                # association between a real fact/mood and semantic output.
+                lines.append(f"[{m}] {f} [F{fid:02X}] -> {packet}")
+    return "".join(lines * repeat)
 
 
 class Brain:
@@ -295,9 +312,9 @@ def main():
             print(f"  step {step:5d}  ce {loss:.3f}  ({time.time()-t0:.1f}s)")
     print(f"  final ce {loss:.3f}")
 
-    print("  sample generations:")
-    for pr in ["[happy] it is sunny ->", "[sleepy] it is night ->",
-               "[excited] found your remote ->", "[grumpy] battery is low ->"]:
+    print("  sample semantic tails:")
+    for pr in ["[happy] it is sunny [F01] ->", "[sleepy] it is night [F0B] ->",
+               "[excited] found your remote [F08] ->", "[grumpy] battery is low [F04] ->"]:
         print(f"    {pr:38} => {b.generate(pr, stoi, itos)!r}")
 
     size = write_foxb(args.out, b, itos)

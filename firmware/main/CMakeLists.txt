@@ -22,6 +22,7 @@ idf_component_register(
     SRCS
         "fox_main.cpp"
         "fox_brain.cpp"
+        "foxese.cpp"
         "fox_voice.cpp"
         "fox_memory.cpp"
         "fox_llm.cpp"

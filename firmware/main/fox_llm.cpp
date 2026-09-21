@@ -17,6 +17,7 @@
 // fully functional either way.
 #include "fox.h"
 #include "fox_decls.h"
+#include "foxese.h"
 #include <esp_partition.h>
 #include <esp_heap_caps.h>
 #include <math.h>
@@ -123,27 +124,17 @@ String llm_flavour(const String& fact, FoxMood mood, const FoxConfig& cfg) {
     // Build the prompt: a mood tag + the fact, then let the model continue with
     // a short cute wrapper. Keep generation tiny (a dozen tokens) for latency.
     static const char* MTAG[] = {"[sleepy]", "[calm]", "[happy]", "[excited]", "[grumpy]"};
-    String prompt = String(MTAG[mood]) + " " + fact + " ->";
+    uint8_t fid = foxese_fact_id(fact);
+    char fidbuf[5]; snprintf(fidbuf, sizeof(fidbuf), "F%02X", fid);
+    // The input is readable context; the output is FOXESE.  The model never
+    // has authority to invent the fact text or a capability/action.
+    String prompt = String(MTAG[mood]) + " " + fact + " [" + fidbuf + "] ->";
 
-    String out = llm_generate(prompt, /*max_new=*/16, /*temp=*/0.7f);
-    if (out.length() < 2) return "";
-
-    // Safety gate: the continuation must still reference the fact so the model
-    // can't replace it with an invented one. We check that a distinctive token
-    // from the fact survives; if not, discard and fall back to templates.
-    String factlow = fact; factlow.toLowerCase();
-    String outlow = out; outlow.toLowerCase();
-    // pull the longest word from the fact as the anchor
-    int best = 0, bs = 0, cur = 0, cs = 0;
-    for (size_t i = 0; i <= factlow.length(); ++i) {
-        char c = i < factlow.length() ? factlow[i] : ' ';
-        if (isalnum(c)) { if (!cur) cs = i; cur++; }
-        else { if (cur > best) { best = cur; bs = cs; } cur = 0; }
-    }
-    if (best >= 4) {
-        String anchor = factlow.substring(bs, bs + best);
-        if (outlow.indexOf(anchor) < 0) return "";  // model drifted off-fact
-    }
-    out.trim();
-    return out;
+    String tail = llm_foxese_tail(prompt);
+    if (tail.length() != 6) return "";
+    Foxese x;
+    String packet = foxese_encode((uint8_t)mood, fid, (uint8_t)(tail[1]-'0'),
+                                  (uint8_t)(tail[3]-'0'), (uint8_t)(tail[5]-'0'));
+    if (!foxese_parse(packet, x)) return "";
+    return foxese_expand(x, fact);
 }

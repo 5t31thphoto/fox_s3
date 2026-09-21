@@ -93,16 +93,7 @@ jobs:
           target: esp32s3
           path: firmware
 
-      - name: Voice build report
-        run: |
-          test -s firmware/build/fox.bin
-          PICO_HDR=$(find firmware/managed_components -path '*/picotts/include/picotts.h' -print -quit || true)
-          test -n "$PICO_HDR"
-          echo "PicoTTS managed component present: $PICO_HDR"
-          test -s "$(find firmware/build -name picotts_ta.bin -print -quit)"
-          test -s "$(find firmware/build -name picotts_sg.bin -print -quit)"
-          echo "SAM fallback remains compiled in fox_voice.cpp."
-
+     
       - name: Assemble images + web-flash manifests (offsets from IDF)
         run: |
           set -e

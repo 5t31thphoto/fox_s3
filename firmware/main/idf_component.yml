@@ -29,6 +29,6 @@ dependencies:
   # Offline speech recognition (MultiNet7 + AFE).
   espressif/esp-sr: "^2.0.0"
   # Arduino core as an IDF component (provides WiFi/BLE/HTTPClient/Preferences).
-  espressif/arduino-esp32: "^3.0.0"
+  espressif/arduino-esp32: "3.3.7"
   # JSON for cloud chat/transcription payloads and USB config parsing.
   bblanchon/arduinojson: "^7.0.0"

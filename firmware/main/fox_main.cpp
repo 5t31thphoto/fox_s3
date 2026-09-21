@@ -637,7 +637,12 @@ static void fox_backlight(uint8_t brightness) {
     Serial.printf("FOX: LP5562 backlight %u\n", brightness);
 }
 
+static uint32_t last_activity = 0;
+static uint32_t last_idle_chatter = 0;
+
 void setup() {
+    Serial.begin(115200);
+    delay(50);
     Serial.println("FOX: setup FOX_GH_lp5562");
     auto c = M5.config();
     c.serial_baudrate = 115200;
@@ -648,7 +653,6 @@ void setup() {
     // Do NOT enable atomic_echo — it hung M5.begin() on this hardware.
     M5.begin(c);
 
-    Serial.begin(115200);
     Serial.printf("FOX: board=%d displays=%d LCD=%dx%d\n",
                   (int)M5.getBoard(), (int)M5.getDisplayCount(),
                   (int)M5.Display.width(), (int)M5.Display.height());
@@ -701,11 +705,9 @@ void setup() {
     face_wake();
     face_splash(cfg);            // custom boot splash (name/effect/fox graphic)
     speak(String("hi! i'm ") + cfg.name + "~");
+    last_activity = millis();    // don't light-sleep 2 min after boot with activity=0
     Serial.println("FOX: ready");
 }
-
-static uint32_t last_activity = 0;
-static uint32_t last_idle_chatter = 0;
 
 void loop() {
     M5.update();
@@ -800,14 +802,31 @@ void loop() {
 // ============================================================================
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include <esp_log.h>
+#include <esp_rom_sys.h>
 
-static void fox_task(void*) {
-    setup();
-    for (;;) { loop(); vTaskDelay(1); }
-}
+// Arduino-as-component does NOT reliably call setup()/loop() via AUTOSTART in
+// this project (log stopped at "Returned from app_main()" with no FOX: lines).
+// Do not depend on xTaskCreate either — if it fails, setup never runs and the
+// symptom is identical. Run setup/loop on the main task (stack sized in
+// sdkconfig: CONFIG_ESP_MAIN_TASK_STACK_SIZE=32768).
+
+extern "C" void initArduino();
 
 extern "C" void app_main(void) {
-    initArduino();                       // USB/Serial/heap/etc. (Arduino core)
-    // Pin to core 1 (APP_CPU), same as Arduino's own loopTask would.
-    xTaskCreatePinnedToCore(fox_task, "fox", 32768, nullptr, 1, nullptr, 1);
+    esp_rom_printf("\r\nFOX: app_main enter\r\n");
+    ESP_LOGI("FOX", "app_main enter");
+
+    initArduino();
+    esp_rom_printf("FOX: initArduino done\r\n");
+
+    // setup() must run on this task — not deferred to a create that can fail.
+    setup();
+    esp_rom_printf("FOX: setup returned into loop\r\n");
+
+    for (;;) {
+        loop();
+        vTaskDelay(1);
+    }
+    // never returns — if you see "Returned from app_main()" the image is old
 }

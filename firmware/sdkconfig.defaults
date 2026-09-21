@@ -77,3 +77,6 @@ CONFIG_COMPILER_DISABLE_GCC13_WARNINGS=y
 # build even emitted the #warning pointing right at it.)
 CONFIG_MBEDTLS_PSK_MODES=y
 CONFIG_MBEDTLS_KEY_EXCHANGE_PSK=y
+
+# app_main runs setup()/loop() inline — needs the same stack we used for fox_task
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=32768

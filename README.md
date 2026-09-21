@@ -1,4 +1,4 @@
-🦊 Fox Voice Companion
+# 🦊 Fox Voice Companion
 
 A cute, fidgety anime-fox companion that lives on an **M5Stack AtomS3R** with an
 **Atomic Echo Base**. It listens, talks, makes faces, remembers you, blasts IR at

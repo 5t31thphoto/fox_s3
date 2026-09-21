@@ -6,7 +6,7 @@
 //
 // Interaction model (per the owner's emphatic instructions):
 //   * PUSH-TO-TALK ONLY. Hold the USER button to talk; release to process.
-//     There is NO wake word. A short tap opens the menu instead.
+//     A single click belongs to the current screen; only a double click opens the menu.
 //   * "Conversation mode" is opt-in from the menu (or by asking the fox). In
 //     that mode it keeps listening for a while and times out on silence.
 //
@@ -509,7 +509,7 @@ static void launch(const char* id) {
 void menu_dispatch(const char* id) {
     if      (!strcmp(id, "talk"))   { /* returns to PTT loop */ }
     else if (!strcmp(id, "conv"))   { cfg.conversation = true; speak("okay, i'm listening~"); }
-    else if (!strcmp(id, "volume")) { cfg.volume = (cfg.volume + 20) % 120; audio_set_volume(cfg.volume > 100 ? 100 : cfg.volume); save_config(); speak("volume set"); }
+    else if (!strcmp(id, "volume")) { volume_adjust(); }
     else if (!strcmp(id, "voice"))  { cfg.voice_pack = (cfg.voice_pack == "chatterbox") ? "critter" : "chatterbox"; voice_begin(cfg); save_config(); speak("voice changed~"); }
     else if (!strcmp(id, "forget")) { mem_clear(); speak("okay, all forgotten"); }
     else if (!strcmp(id, "sleep"))  { speak("night night"); enter_light_sleep(); }
@@ -732,25 +732,27 @@ void loop() {
 
     uint32_t now = millis();
 
-    // --- Push-to-talk + double-click-to-menu ------------------------------
-    // Double-click opens the menu from anywhere (M5 detects it for us).
-    if (M5.BtnA.wasDoubleClicked()) {
+    // --- Button semantics ---------------------------------------------------
+    // A single click NEVER opens the menu. It is deliberately available to the
+    // current app/game. Double click is the one universal menu gesture.
+    ButtonEvent ev = input_button_event();
+    if (ev == BTN_DOUBLE) {
         open_menu();
         last_activity = now;
-    } else {
-        ButtonEvent ev = input_button_event();
-        if (ev == BTN_HOLD_START) {
-            face_listen();
-            size_t n = 0;
-            int16_t* audio = capture_while_held(&n);   // returns on release / max
-            face_think();
-            if (audio && n > SAMPLE_RATE / 3) process_utterance(audio, n);
-            if (audio) heap_caps_free(audio);
-            last_activity = now;
-        } else if (ev == BTN_TAP) {
-            open_menu();
-            last_activity = now;
-        }
+    } else if (ev == BTN_HOLD_START) {
+        face_listen();
+        size_t n = 0;
+        int16_t* audio = capture_while_held(&n);
+        face_think();
+        if (audio && n > SAMPLE_RATE / 3) process_utterance(audio, n);
+        if (audio) heap_caps_free(audio);
+        last_activity = now;
+    } else if (ev == BTN_TAP) {
+        // Outside an app, a single click is simply a little fox interaction.
+        needs_interact(needs, false);
+        face_set_mouth(0.55f);
+        face_caption("boop!");
+        last_activity = now;
     }
 
     // If a game/tool/toy asked to bail to the menu (double-click), do it now.

@@ -11,7 +11,7 @@ short, cute, ON-FACT continuation.
 
 Packs:
   --pack A   dim=64  L=4  ~260KB int8   ("Chatterbox" default brain)
-  --pack B   dim=96  L=6  ~1MB int8     ("Critter" brain)
+  --pack B   dim=72  L=6  ~294KB int4     ("Critter" brain; deeper but compact)
 
 Even a lightly trained brain is safe: the firmware discards any continuation
 that drops the fact, so the worst case is silence + deterministic templates.
@@ -231,23 +231,47 @@ def quantize_q8(mat, gs):
     return q, s
 
 
+def quantize_q4(mat, gs):
+    """Symmetric signed int4, two weights per byte, fp32 scale per group."""
+    rows, cols = mat.shape
+    assert cols % gs == 0 and cols % 2 == 0
+    q = np.empty((rows, cols // 2), np.uint8)
+    s = np.empty((rows, cols // gs), np.float16)
+    for r in range(rows):
+        row = mat[r]
+        for g in range(0, cols, gs):
+            grp = row[g:g+gs]
+            amax = np.abs(grp).max()
+            scale = amax / 7.0 if amax > 0 else 1.0
+            s[r, g // gs] = scale
+            qi = np.clip(np.round(grp / scale), -8, 7).astype(np.int8)
+            for j in range(0, gs, 2):
+                lo = int(qi[j]) & 0x0F
+                hi = int(qi[j+1]) & 0x0F
+                q[r, (g+j)//2] = lo | (hi << 4)
+    return q, s
+
+
 def write_foxb(path, b, itos):
     P = b.P
+    bits = 4 if b.dim == 72 and b.L == 6 else 8
     with open(path, "wb") as f:
         f.write(b"FOXB")
         f.write(struct.pack("<I", 1))
         f.write(struct.pack("<iiiiiiii", b.dim, b.hidden, b.L, b.H,
-                            b.n_kv_heads, b.vocab, b.seq_len, 1))  # shared_cls=1
+                            b.n_kv_heads, b.vocab, b.seq_len, 1))
         f.write(struct.pack("<i", b.gs))
-        f.write(struct.pack("<6i", 0, 0, 0, 0, 0, 0))
+        # reserved[0] is the weight precision: 0/8 = legacy int8, 4 = packed int4.
+        f.write(struct.pack("<6i", bits, 0, 0, 0, 0, 0))
         f.write(P["emb"].astype("<f4").tobytes())
         f.write(np.stack([P[f"ga{l}"] for l in range(b.L)]).astype("<f4").tobytes())
         f.write(np.stack([P[f"gf{l}"] for l in range(b.L)]).astype("<f4").tobytes())
         f.write(P["g_fin"].astype("<f4").tobytes())
         for nm in ("Wq", "Wk", "Wv", "Wo", "W1", "W2", "W3"):
             for l in range(b.L):
-                q, s = quantize_q8(P[f"{nm}{l}"], b.gs)
-                f.write(q.tobytes()); f.write(s.astype("<f4").tobytes())
+                q, s = (quantize_q4(P[f"{nm}{l}"], b.gs) if bits == 4
+                        else quantize_q8(P[f"{nm}{l}"], b.gs))
+                f.write(q.tobytes()); f.write(s.astype("<f2").tobytes() if bits == 4 else s.astype("<f4").tobytes())
         for tok in itos:
             f.write(struct.pack("<f", 0.0))
             f.write(struct.pack("<H", len(tok)))
@@ -273,14 +297,16 @@ def main():
         b = Brain(dim=64, hidden=128, n_layers=4, n_heads=4, vocab=vocab,
                   seq_len=64, gs=16, seed=args.seed)
     else:
-        b = Brain(dim=96, hidden=256, n_layers=6, n_heads=6, vocab=vocab,
-                  seq_len=96, gs=16, seed=args.seed)
+        # Six layers preserve depth/attention capacity while packed int4 keeps
+        # the finished brain under the 0x48000 flash partition.
+        b = Brain(dim=72, hidden=192, n_layers=6, n_heads=6, vocab=vocab,
+                  seq_len=72, gs=8, seed=args.seed)
 
     nparam = sum(v.size for _, v in b.P.items())
     print(f"train_brain: pack {args.pack}  vocab {vocab}  ~{nparam//1000}K params "
           f"dim={b.dim} L={b.L} H={b.H} seq={b.seq_len}")
 
-    T = min(b.seq_len, 48)
+    T = min(b.seq_len, 32)
     t0 = time.time()
     loss = 0.0
     for step in range(args.steps):

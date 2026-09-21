@@ -77,6 +77,7 @@ bool load_model() {
     M.base = (const uint8_t*)ptr;
     memcpy(&M.h, M.base, sizeof(Header));
     if (memcmp(M.h.magic, "FOXB", 4) != 0 || M.h.version != 1) return false;
+    if (M.h.reserved[0] != 0 && M.h.reserved[0] != 4 && M.h.reserved[0] != 8) return false;
     if (M.h.dim <= 0 || M.h.dim > 512 || M.h.n_layers <= 0 || M.h.n_layers > 12)
         return false;
 
@@ -125,7 +126,7 @@ String llm_flavour(const String& fact, FoxMood mood, const FoxConfig& cfg) {
     static const char* MTAG[] = {"[sleepy]", "[calm]", "[happy]", "[excited]", "[grumpy]"};
     String prompt = String(MTAG[mood]) + " " + fact + " ->";
 
-    String out = llm_generate(prompt, /*max_new=*/16, /*temp=*/0.7f);
+    String out = llm_generate(prompt, /*max_new=*/16, /*temp=*/0.35f);
     if (out.length() < 2) return "";
 
     // Safety gate: the continuation must still reference the fact so the model

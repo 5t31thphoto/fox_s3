@@ -5,6 +5,7 @@
 #include <M5GFX.h>
 
 static M5Canvas* face_canvas = nullptr;
+extern bool g_goto_menu;
 static FoxConfig* face_cfg = nullptr;
 static float mouth_open = 0.f;      // 0..1
 static int   blink_timer = 0;
@@ -12,6 +13,8 @@ static bool  blinking = false;
 static String caption;
 static uint32_t caption_until = 0;
 static uint8_t ear_wiggle = 0;
+static float face_tilt_x = 0.f, face_tilt_y = 0.f;
+static uint32_t face_shake_until = 0;
 
 void face_begin(FoxConfig& c) {
     face_cfg = &c;
@@ -59,9 +62,16 @@ void face_splash(FoxConfig& c) {
         face_canvas->fillCircle(55, 44, 3, 0x0000);
         face_canvas->fillCircle(73, 44, 3, 0x0000);
         face_canvas->fillTriangle(60, 52, 68, 52, 64, 57, 0x0000);
-        // name / splash text
-        face_canvas->setTextColor(0xFFFF); face_canvas->setTextDatum(bottom_center);
-        face_canvas->drawString(txt.substring(0, 20), 64, 118);
+        // name / splash text — measured wrapping, not a hard 20-character cut.
+        face_canvas->setTextColor(0xFFFF); face_canvas->setTextDatum(top_left);
+        String rest = txt; int sy = 106;
+        for (int line=0; line<2 && rest.length(); ++line) {
+            int cut = rest.length();
+            while (cut > 1 && face_canvas->textWidth(rest.substring(0,cut)) > 124) --cut;
+            if (cut < (int)rest.length()) { int sp = rest.lastIndexOf(' ',cut-1); if(sp>6) cut=sp; }
+            String part=rest.substring(0,cut); part.trim(); face_canvas->drawString(part,2,sy); sy+=10;
+            rest=rest.substring(cut); rest.trim();
+        }
         face_canvas->pushSprite(0, 0);
         frame++;
         delay(40);
@@ -71,90 +81,95 @@ void face_splash(FoxConfig& c) {
 // Draw the fox at the current expression. Eyes/ears/mouth respond to mood and
 // to the live mouth_open value while speaking.
 void face_draw(FoxMood mood) {
-    if (!face_canvas || !face_cfg) return;   // never draw before face_begin()
-    uint16_t bg = face_cfg->color_bg;
-    uint16_t fur = face_cfg->color_primary;
-    uint16_t cream = face_cfg->color_accent;
+    if (!face_canvas || !face_cfg) return;
+
+    // Read the IMU here too, so idle animations and every app-rendered fox face
+    // react immediately even when the main loop is not calling face_tick().
+    float ax, ay, az;
+    if (M5.Imu.getAccel(&ax, &ay, &az)) {
+        float roll = atan2f(ay, az);
+        float pitch = atan2f(-ax, sqrtf(ay*ay + az*az));
+        face_tilt_x = constrain(roll / 0.65f, -1.0f, 1.0f);
+        face_tilt_y = constrain(pitch / 0.65f, -1.0f, 1.0f);
+        float mag = sqrtf(ax*ax + ay*ay + az*az);
+        if (mag > 2.2f) face_shake_until = millis() + 420;
+    }
+    const bool shaken = millis() < face_shake_until;
+
+    uint16_t bg = face_cfg->color_bg, fur = face_cfg->color_primary, cream = face_cfg->color_accent;
     face_canvas->fillSprite(bg);
 
-    // head
-    face_canvas->fillEllipse(64, 66, 44, 40, fur);
-    // cheeks / muzzle
-    face_canvas->fillEllipse(64, 82, 26, 20, cream);
-    // ears (triangles), wiggle offset
-    int ew = (ear_wiggle % 8 < 4) ? 0 : 2;
-    face_canvas->fillTriangle(30, 40, 44, 8 - ew, 56, 38, fur);
-    face_canvas->fillTriangle(98, 40, 84, 8 - ew, 72, 38, fur);
-    face_canvas->fillTriangle(36, 34, 45, 16, 52, 34, bg);
-    face_canvas->fillTriangle(92, 34, 83, 16, 76, 34, bg);
+    int bob = shaken ? ((millis() / 45) & 1 ? 2 : -2) : (int)(face_tilt_y * 2.0f);
+    int ear = shaken ? ((millis() / 35) % 5 - 2) : (int)(face_tilt_x * 3.0f);
+    face_canvas->fillEllipse(64, 66 + bob, 44, 40, fur);
+    face_canvas->fillEllipse(64, 82 + bob, 26, 20, cream);
+    face_canvas->fillTriangle(30,40, 44,8-ear, 56,38, fur);
+    face_canvas->fillTriangle(98,40, 84,8+ear, 72,38, fur);
+    face_canvas->fillTriangle(36,34,45,16-ear,52,34,bg);
+    face_canvas->fillTriangle(92,34,83,16+ear,76,34,bg);
 
-    // eyes — shape depends on mood
+    int px = (int)(face_tilt_x * 5.0f);
+    int py = (int)(face_tilt_y * 3.0f);
     uint16_t eye = 0x0000;
     if (blinking) {
-        face_canvas->drawFastHLine(44, 60, 14, eye);
-        face_canvas->drawFastHLine(70, 60, 14, eye);
+        face_canvas->drawFastHLine(44+px, 60+py, 14, eye);
+        face_canvas->drawFastHLine(70+px, 60+py, 14, eye);
     } else {
         switch (mood) {
             case MOOD_SLEEPY:
-                face_canvas->drawArc(51, 60, 8, 8, 200, 340, eye);
-                face_canvas->drawArc(77, 60, 8, 8, 200, 340, eye);
+                face_canvas->drawArc(51+px,60+py,8,8,200,340,eye);
+                face_canvas->drawArc(77+px,60+py,8,8,200,340,eye);
                 break;
             case MOOD_EXCITED:
-                face_canvas->fillCircle(51, 58, 7, eye);
-                face_canvas->fillCircle(77, 58, 7, eye);
-                face_canvas->fillCircle(53, 56, 2, 0xFFFF);
-                face_canvas->fillCircle(79, 56, 2, 0xFFFF);
+                face_canvas->fillCircle(51+px,58+py,7,eye); face_canvas->fillCircle(77+px,58+py,7,eye);
+                face_canvas->fillCircle(53+px,56+py,2,0xFFFF); face_canvas->fillCircle(79+px,56+py,2,0xFFFF);
                 break;
             case MOOD_GRUMPY:
-                face_canvas->drawLine(44, 56, 58, 60, eye);
-                face_canvas->drawLine(84, 56, 70, 60, eye);
-                face_canvas->fillCircle(51, 60, 4, eye);
-                face_canvas->fillCircle(77, 60, 4, eye);
+                face_canvas->drawLine(44+px,56+py,58+px,60+py,eye); face_canvas->drawLine(84+px,56+py,70+px,60+py,eye);
+                face_canvas->fillCircle(51+px,60+py,4,eye); face_canvas->fillCircle(77+px,60+py,4,eye);
                 break;
             default:
-                face_canvas->fillCircle(51, 59, 6, eye);
-                face_canvas->fillCircle(77, 59, 6, eye);
-                face_canvas->fillCircle(53, 57, 2, 0xFFFF);
-                face_canvas->fillCircle(79, 57, 2, 0xFFFF);
+                face_canvas->fillCircle(51+px,59+py,6,eye); face_canvas->fillCircle(77+px,59+py,6,eye);
+                face_canvas->fillCircle(53+px,57+py,2,0xFFFF); face_canvas->fillCircle(79+px,57+py,2,0xFFFF);
         }
     }
-    // nose
-    face_canvas->fillTriangle(60, 76, 68, 76, 64, 82, eye);
-    // mouth — opens with mouth_open while speaking
-    int mo = (int)(mouth_open * 12);
-    if (mo < 1) {
-        face_canvas->drawArc(64, 84, 8, 8, 20, 160, eye);
+    face_canvas->fillTriangle(60,76+bob,68,76+bob,64,82+bob,eye);
+
+    // More expressive lipsync geometry: jaw opening, dark mouth cavity,
+    // tongue/highlight and a small upper-lip curve instead of one ellipse.
+    float mo = constrain(mouth_open, 0.f, 1.f);
+    if (mo < 0.08f) {
+        face_canvas->drawArc(64,84+bob,8,7,18,162,eye);
     } else {
-        face_canvas->fillEllipse(64, 88, 7, 2 + mo, eye);
+        int h = 3 + (int)(mo * 13);
+        face_canvas->fillRoundRect(55,82+bob,18, h, 7, eye);
+        if (mo > 0.38f) {
+            int th = max(2, (int)(h * 0.28f));
+            face_canvas->fillRoundRect(58,82+bob+h-th,12,th,3,0xF800);
+        }
+        face_canvas->drawFastHLine(57,82+bob,14,0xFFFF);
     }
 
-    // Caption: up to 3 wrapped lines at bottom (128px ≈ 21 chars/line at size 1)
-    if (caption.length() && millis() < caption_until && face_cfg && face_cfg->captions) {
-        face_canvas->fillRect(0, 92, 128, 36, 0x0000);
-        face_canvas->setTextColor(0xFFFF);
-        face_canvas->setTextSize(1);
-        face_canvas->setTextDatum(top_left);
-        String s = caption;
-        int y = 94;
-        for (int line = 0; line < 3 && s.length(); ++line) {
-            int take = 21;
-            if ((int)s.length() <= take) {
-                face_canvas->drawString(s, 2, y);
-                break;
+    // Caption uses measured pixel width rather than a fixed character count;
+    // proportional glyphs were the reason long text was being clipped.
+    if (caption.length() && millis() < caption_until && face_cfg->captions) {
+        face_canvas->fillRect(0, 94, 128, 34, 0x0000);
+        face_canvas->setTextColor(0xFFFF); face_canvas->setTextSize(1); face_canvas->setTextDatum(top_left);
+        String rest = caption; int y = 95;
+        for (int line=0; line<3 && rest.length(); ++line) {
+            int cut = rest.length();
+            while (cut > 1 && face_canvas->textWidth(rest.substring(0,cut)) > 124) --cut;
+            if (cut < (int)rest.length()) {
+                int sp = rest.lastIndexOf(' ', cut-1);
+                if (sp > 8) cut = sp;
             }
-            // break on last space before take if possible
-            int br = take;
-            for (int i = take; i > 8; --i) {
-                if (s[i] == ' ') { br = i; break; }
-            }
-            face_canvas->drawString(s.substring(0, br), 2, y);
-            s = s.substring(br);
-            while (s.length() && s[0] == ' ') s = s.substring(1);
-            y += 11;
+            String part = rest.substring(0,cut); part.trim();
+            face_canvas->drawString(part,2,y); y += 10;
+            rest = rest.substring(cut); rest.trim();
         }
         face_canvas->setTextDatum(middle_center);
     }
-    face_canvas->pushSprite(0, 0);
+    face_canvas->pushSprite(0,0);
 }
 
 // Called every loop to animate idle motion (blink, ear wiggle).
@@ -170,6 +185,7 @@ void face_tick(FoxMood mood) {
     if (++blink_timer > 220) { blinking = true; }
     if (blink_timer > 230)   { blinking = false; blink_timer = 0; }
     if ((blink_timer & 7) == 0) ear_wiggle++;
+    if (millis() < face_shake_until) ear_wiggle += 3;
     // decay mouth toward closed when not actively driven
     mouth_open *= 0.85f;
 
@@ -242,8 +258,14 @@ void face_lipsync_mode() {
     if (!g_echo_ok) return;
     while (true) {
         M5.update();
-        if (M5.BtnA.wasClicked()) break;
+        ButtonEvent ev = input_button_event();
+        if (ev == BTN_DOUBLE) { g_goto_menu = true; break; }
+        // A single click toggles between a smile and a surprised mouth while
+        // still leaving the mode running; double click is the exit gesture.
+        static bool grin = false;
+        if (ev == BTN_TAP) grin = !grin;
         face_lipsync_from_mic_once();
+        if (grin) face_set_mouth(min(1.0f, mouth_open + 0.18f));
         face_draw(MOOD_HAPPY);
         delay(1);
     }

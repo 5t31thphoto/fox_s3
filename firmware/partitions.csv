@@ -1,11 +1,14 @@
-# 8MB — factory grown for PicoTTS (~4.9MB app). Offline speech model still ~2.625MB.
-# foxbrain reduced to 384KB (foxbrainA fits; foxbrainB 848KB will NOT — use pack A).
+# 8MB — packed layout for AtomS3R. The model gets enough room for the current
+# srmodels.bin (2,761,093 bytes), while the compact int4 Brain B, IR blob and
+# LittleFS journal all fit exactly inside the 8MB flash boundary.
+# model starts at 0x4e2000; 0x20000 remains available between factory and model.
+#
 # Name       Type  SubType   Offset     Size
 nvs,         data, nvs,      0x009000,  0x006000,
 otadata,     data, ota,      0x00f000,  0x002000,
 phy_init,    data, phy,      0x011000,  0x001000,
 factory,     app,  factory,  0x020000,  0x4c2000,
-model,       data, spiffs,   0x4e2000,  0x2c0000,
-foxbrain,    data, 0x45,     0x782000,  0x060000,
-foxdata,     data, 0x46,     0x7e2000,  0x010000,
-foxfs,       data, spiffs,   0x7f2000,  0x00e000,
+model,       data, spiffs,   0x4e2000,  0x2a3000,
+foxbrain,    data, 0x45,     0x785000,  0x048000,
+foxdata,     data, 0x46,     0x7cd000,  0x02f000,
+foxfs,       data, spiffs,   0x7fc000,  0x004000,

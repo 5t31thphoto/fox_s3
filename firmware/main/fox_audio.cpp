@@ -67,6 +67,23 @@ bool audio_record(int16_t* buf, size_t size_samples) {
     return ok;
 }
 
+float audio_level_rms() {
+    static int16_t sample[128];
+    if (!g_echo_ok || !audio_record(sample, 128)) return 0.0f;
+    double sum = 0.0;
+    for (int i = 0; i < 128; ++i) {
+        float v = sample[i] / 32768.0f;
+        sum += (double)v * v;
+    }
+    float rms = sqrtf((float)(sum / 128.0));
+    // Typical room/mic levels are far below full scale; make the useful range
+    // occupy most of 0..1 without making silence look loud.
+    float level = (rms - 0.008f) * 5.5f;
+    if (level < 0) level = 0;
+    if (level > 1) level = 1;
+    return level;
+}
+
 // Write mono int16 @ SAMPLE_RATE as stereo interleaved to EchoBase.
 static bool play_mono16_stereo(const int16_t* mono, size_t n_samples) {
     if (!g_echo_ok || !mono || !n_samples) return false;

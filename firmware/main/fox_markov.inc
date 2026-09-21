@@ -129,8 +129,10 @@ String rf_mood_tick() {
     if (now - last_sample < 45000) return "";   // sample at most ~every 45s
     last_sample = now;
 
-    int n = WiFi.scanNetworks(false, false, false, 120);   // fast passive-ish
+    radio_enter_wifi();
+    int n = WiFi.scanNetworks(false, false, false, 120);
     WiFi.scanDelete();
+    tool_radio_release();
     if (n < 0) n = 0;
 
     String remark = "";

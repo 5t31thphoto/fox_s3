@@ -35,9 +35,17 @@ struct Cursor {
     explicit Cursor(const uint8_t* base) : p(base) {}
     const float* f32(size_t n) { const float* r = (const float*)p; p += n * 4; return r; }
     QTensor q8(size_t rows, size_t cols, int gs) {
-        QTensor t;
-        t.q = (const int8_t*)p; p += rows * cols;
+        QTensor t{};
+        t.q = p; p += rows * cols;
         t.s = (const float*)p;  p += (rows * cols / gs) * 4;
+        t.s16 = nullptr;
+        return t;
+    }
+    QTensor q4(size_t rows, size_t cols, int gs) {
+        QTensor t{};
+        t.q = p; p += (rows * cols + 1) / 2;
+        t.s16 = (const uint16_t*)p; p += (rows * cols / gs) * 2;
+        t.s = nullptr;
         return t;
     }
 };
@@ -68,15 +76,17 @@ static void resolve_weights() {
                                      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT); };
     W.wq = arr(L); W.wk = arr(L); W.wv = arr(L); W.wo = arr(L);
     W.w1 = arr(L); W.w2 = arr(L); W.w3 = arr(L);
-    for (int l = 0; l < L; ++l) W.wq[l] = c.q8(dim, dim, gs);
-    for (int l = 0; l < L; ++l) W.wk[l] = c.q8(dim, kvdim, gs);
-    for (int l = 0; l < L; ++l) W.wv[l] = c.q8(dim, kvdim, gs);
-    for (int l = 0; l < L; ++l) W.wo[l] = c.q8(dim, dim, gs);
-    for (int l = 0; l < L; ++l) W.w1[l] = c.q8(hidden, dim, gs);
-    for (int l = 0; l < L; ++l) W.w2[l] = c.q8(dim, hidden, gs);
-    for (int l = 0; l < L; ++l) W.w3[l] = c.q8(hidden, dim, gs);
-    if (!h.shared_cls) W.wcls = c.q8(h.vocab, dim, gs);
-    else { W.wcls.q = nullptr; W.wcls.s = nullptr; }
+    const bool q4 = h.reserved[0] == 4;
+    auto qt = [&](size_t rows, size_t cols) { return q4 ? c.q4(rows, cols, gs) : c.q8(rows, cols, gs); };
+    for (int l = 0; l < L; ++l) W.wq[l] = qt(dim, dim);
+    for (int l = 0; l < L; ++l) W.wk[l] = qt(kvdim, dim);
+    for (int l = 0; l < L; ++l) W.wv[l] = qt(kvdim, dim);
+    for (int l = 0; l < L; ++l) W.wo[l] = qt(dim, dim);
+    for (int l = 0; l < L; ++l) W.w1[l] = qt(hidden, dim);
+    for (int l = 0; l < L; ++l) W.w2[l] = qt(dim, hidden);
+    for (int l = 0; l < L; ++l) W.w3[l] = qt(hidden, dim);
+    if (!h.shared_cls) W.wcls = qt(h.vocab, dim);
+    else { W.wcls.q = nullptr; W.wcls.s = nullptr; W.wcls.s16 = nullptr; }
     // vocab blob follows; parse into V
     const uint8_t* vp = c.p;
     static const char* toks[512];
@@ -111,19 +121,42 @@ static void softmax(float* x, int n) {
 }
 
 // out[rows] = W(rows x cols, Q8 grouped) * x[cols]  (x is fp32)
+static float half_to_float(uint16_t h) {
+    uint32_t sign = (uint32_t)(h & 0x8000) << 16;
+    uint32_t exp = (h >> 10) & 0x1F, frac = h & 0x03FF;
+    uint32_t bits;
+    if (exp == 0) {
+        if (!frac) bits = sign;
+        else {
+            int e = -14; uint32_t f = frac;
+            while ((f & 0x400) == 0) { f <<= 1; --e; }
+            f &= 0x3FF; bits = sign | (uint32_t)(e + 127) << 23 | (f << 13);
+        }
+    } else if (exp == 31) bits = sign | 0x7F800000u | (frac << 13);
+    else bits = sign | ((exp + 112) << 23) | (frac << 13);
+    float out; memcpy(&out, &bits, sizeof(out)); return out;
+}
+
+// out = W*x. Legacy packs use int8 + fp32 group scales. Brain B uses packed
+// int4 + fp16 group scales, halving weight storage while retaining six layers.
 static void qmatmul(float* out, const float* x, const QTensor& w,
                     int rows, int cols, int gs) {
-    for (int r = 0; r < rows; ++r) {
-        float acc = 0.f;
-        const int8_t* wq = w.q + (size_t)r * cols;
-        const float* ws = w.s + (size_t)r * (cols / gs);
-        for (int g = 0; g < cols; g += gs) {
-            float scale = ws[g / gs];
-            float part = 0.f;
-            for (int j = 0; j < gs; ++j) part += (float)wq[g + j] * x[g + j];
-            acc += part * scale;
+    const bool q4 = w.s16 != nullptr;
+    for (int r=0;r<rows;++r) {
+        float acc=0;
+        for(int g=0;g<cols;g+=gs){
+            float scale=q4?half_to_float(w.s16[(size_t)r*(cols/gs)+g/gs]):w.s[(size_t)r*(cols/gs)+g/gs];
+            float part=0;
+            if(q4){
+                const uint8_t* q=w.q+(size_t)r*(cols/2);
+                for(int j=0;j<gs;j+=2){uint8_t z=q[(g+j)/2];int a=(z&15);int b=(z>>4)&15;if(a>=8)a-=16;if(b>=8)b-=16;part+=a*x[g+j]+b*x[g+j+1];}
+            }else{
+                const int8_t* q=(const int8_t*)w.q+(size_t)r*cols;
+                for(int j=0;j<gs;++j)part+=(float)q[g+j]*x[g+j];
+            }
+            acc+=part*scale;
         }
-        out[r] = acc;
+        out[r]=acc;
     }
 }
 

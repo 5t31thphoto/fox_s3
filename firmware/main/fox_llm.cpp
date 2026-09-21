@@ -40,7 +40,11 @@ struct Header {
     int32_t  reserved[6];
 };
 
-struct QTensor { const int8_t* q; const float* s; };  // points into mmap
+struct QTensor {
+    const uint8_t* q;      // raw quantised bytes; int8 or packed int4
+    const float* s;        // fp32 group scales for legacy Q8
+    const uint16_t* s16;   // fp16 group scales for packed Q4
+};  // points into mmap
 
 struct Model {
     Header h{};

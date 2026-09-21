@@ -16,14 +16,14 @@ static uint8_t ear_wiggle = 0;
 void face_begin(FoxConfig& c) {
     face_cfg = &c;
     M5.Display.setColorDepth(16);
-    M5.Display.setBrightness(90);
+    /* brightness set once at boot via LP5562 */
     face_canvas = new M5Canvas(&M5.Display);
     face_canvas->createSprite(128, 128);
     face_canvas->setTextDatum(middle_center);
 }
 
-void face_wake() { M5.Display.setBrightness(90); }
-void face_dim()  { M5.Display.setBrightness(20); }
+void face_wake() { /* brightness set once at boot via LP5562 */ }
+void face_dim()  { /* keep backlight steady for AtomS3R LP5562 */ }
 
 // Custom boot splash: a fox graphic + the user's text, with an optional effect
 // (sparkle / wave / rainbow) configured from the web flasher. Runs ~2.5s.

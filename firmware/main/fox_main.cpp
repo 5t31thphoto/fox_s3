@@ -612,10 +612,36 @@ static void process_utterance(int16_t* audio, size_t n) {
 // uses a plain M5.begin() for the display, then the standalone M5EchoBase
 // library for mic/speaker. We do the same — see fox_audio.cpp / fox_audio.h.
 #include "fox_audio.h"
+#include <Wire.h>
+
+// AtomS3R backlight = LP5562 @ 0x30 on system I2C (SDA=45, SCL=0).
+// Use Wire1 so Atomic Echo Base can keep Wire on 38/39 for ES8311.
+static void fox_backlight(uint8_t brightness) {
+    Wire1.end();
+    Wire1.begin(45, 0, 400000);
+    delay(1);
+    auto wr = [](uint8_t reg, uint8_t val) -> bool {
+        Wire1.beginTransmission(0x30);
+        Wire1.write(reg);
+        Wire1.write(val);
+        return Wire1.endTransmission() == 0;
+    };
+    if (!wr(0x00, 0x40)) {
+        Serial.println("FOX: LP5562 no ACK on Wire1");
+        return;
+    }
+    delay(1);
+    wr(0x08, 0x01);
+    wr(0x70, 0x00);
+    wr(0x0E, brightness);
+    Serial.printf("FOX: LP5562 backlight %u\n", brightness);
+}
 
 void setup() {
+    Serial.println("FOX: setup FOX_GH_lp5562");
     auto c = M5.config();
     c.serial_baudrate = 115200;
+    c.internal_mic = false;
     // Force AtomS3R identity so a failed panel probe can't fall back to the
     // display-less AtomS3Lite board type.
     c.fallback_board = m5::board_t::board_M5AtomS3R;
@@ -627,9 +653,12 @@ void setup() {
                   (int)M5.getBoard(), (int)M5.getDisplayCount(),
                   (int)M5.Display.width(), (int)M5.Display.height());
 
+    // Real backlight once (not GPIO PWM). Do not thrash every frame.
+    fox_backlight(200);
+    M5.Display.setBrightness(200);
+
     load_config();
     face_begin(cfg);
-    M5.Display.setBrightness(255);
     M5.Display.fillScreen(cfg.color_bg);
     M5.Display.setTextColor(cfg.color_primary);
     M5.Display.setTextDatum(middle_center);
@@ -637,9 +666,12 @@ void setup() {
     Serial.println("FOX: display up");
 
     // Echo Base audio via standalone library (same path as the working demo).
+    // Uses Wire 38/39 — never call Wire.begin for LP5562 after this.
     if (!audio_begin(cfg.volume)) {
         M5.Display.drawString("audio fail", 64, 90);
         Serial.println("FOX: audio begin failed — continuing without sound");
+    } else {
+        fox_backlight(200);  // Wire1 only — safe after Echo owns Wire
     }
 
     setenv("TZ", cfg.timezone.c_str(), 1); tzset();

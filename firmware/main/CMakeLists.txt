@@ -7,17 +7,11 @@
 # M5.config().external_speaker.atomic_echo caused M5.begin() to hang on the
 # AtomS3R + Atomic Echo Base, so the display never came up. The working
 # mic-avatar demo uses this same standalone path.
-# PicoTTS is acquired by CI into firmware/components/picotts when available.
-# Do not make it a hard dependency: the local SAM voice is always compiled, so
-# a transient component-download outage cannot produce a dead firmware build.
-set(FOX_REQUIRES)
-if(EXISTS "${CMAKE_SOURCE_DIR}/components/picotts/CMakeLists.txt")
-    list(APPEND FOX_REQUIRES picotts)
-    message(STATUS "FOX: PicoTTS component present — Chatterbox enabled")
-else()
-    message(WARNING "FOX: PicoTTS component absent — Chatterbox will fall back to SAM")
-endif()
-
+#
+# PicoTTS is a managed ESP-IDF dependency (jmattsson/picotts 1.1.3). It is
+# required by the build so the Chatterbox path is actually compiled. This does
+# NOT remove SAM: fox_voice.cpp keeps SAM compiled and uses it whenever PicoTTS
+# initialization/synthesis fails.
 idf_component_register(
     SRCS
         "fox_main.cpp"
@@ -35,7 +29,7 @@ idf_component_register(
         "echobase/M5EchoBase.cpp"
         "echobase/es8311.cpp"
     INCLUDE_DIRS "." "echobase" "sam"
-    REQUIRES ${FOX_REQUIRES} esp-sr
+    REQUIRES picotts
 )
 
 # Our style uses some compact one-liners and cross-TU helpers that the IDF

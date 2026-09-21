@@ -1,18 +1,9 @@
 ## Managed component dependencies.
 ##
-## NOTE ON THE PREVIOUS BUILD FAILURE:
-## The earlier manifest listed two things that are NOT in the ESP Component
-## Registry as versioned packages, so `idf.py build` failed at dependency
-## solving:
-##   - h2zero/esp-nimble-cpp  -> removed. Nothing here uses NimBLE's C++ API
-##     directly; BLE comes from the Arduino core's BLEDevice.h, which the
-##     arduino-esp32 component already provides.
-##   - jmattsson/esp-picotts  -> it's a GitHub repo, not a registry package, so
-##     it can't be requested by "name: ^version". It's declared below as an
-##     OPTIONAL git dependency. The voice code (fox_voice.cpp) is wrapped in
-##     `#if __has_include("picotts.h")`, so the firmware still builds and speaks
-##     (SAM "critter" voice + babble) even if this line is removed or the repo
-##     is unreachable.
+## Managed component dependencies.
+## PicoTTS 1.1.3 is published in the ESP Component Registry as
+## jmattsson/picotts. It is a real build dependency; SAM remains the explicit
+## runtime/compile-time fallback in fox_voice.cpp if PicoTTS itself fails.
 dependencies:
   idf: ">=5.1"
   # Core display/audio/IMU HAL. PINNED TO GIT master because the AtomS3R GC9107
@@ -32,4 +23,5 @@ dependencies:
   espressif/arduino-esp32: "3.3.7"
   # JSON for cloud chat/transcription payloads and USB config parsing.
   bblanchon/arduinojson: "^7.0.0"
+  # Preferred Chatterbox voice; SAM fallback remains compiled separately.
   jmattsson/picotts: "1.1.3"

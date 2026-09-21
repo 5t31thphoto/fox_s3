@@ -41,19 +41,26 @@ bool wants_menu() {
 }
 
 // Simple yes-confirm used by IR narrowing: tap the button within `ms`.
-bool input_wait_yes(uint32_t ms) {
+bool input_wait_yes(uint32_t timeout_ms) {
     uint32_t t0 = millis();
-    while (millis() - t0 < ms) {
+    M5.update();
+    (void)M5.BtnA.wasClicked();
+    (void)M5.BtnA.wasDoubleClicked();
+    while (millis() - t0 < timeout_ms) {
         M5.update();
-        if (digitalRead((int)USER_GPIO) == LOW) {
-            // debounce release
-            while (digitalRead((int)USER_GPIO) == LOW) delay(5);
-            return true;
+        if (M5.BtnA.wasDoubleClicked()) { face_caption("no"); return false; }
+        if (M5.BtnA.wasClicked()) { face_caption("yes"); return true; }
+        float ax, ay, az;
+        if (M5.Imu.getAccel(&ax, &ay, &az)) {
+            float mag = sqrtf(ax*ax + ay*ay + az*az);
+            if (fabsf(mag - 1.0f) > 1.2f) { face_caption("no"); return false; }
         }
-        delay(5);
+        delay(15);
     }
+    face_caption("...");
     return false;
 }
+
 
 // ---- microphone capture -----------------------------------------------------
 // FIX: use fox_audio (EchoBase) instead of M5.Mic — same path as the working
@@ -275,7 +282,11 @@ void open_menu() {
 static String serial_line;
 static void apply_config_json(const String& js) {
     JsonDocument d;
-    if (deserializeJson(d, js) != DeserializationError::Ok) return;
+    if (deserializeJson(d, js) != DeserializationError::Ok) {
+        Serial.println("FOX_CONFIG_ERR");
+        Serial.flush();
+        return;
+    }
     if (d["name"].is<const char*>())  cfg.name = d["name"].as<String>();
     if (d["tz"].is<const char*>())    cfg.timezone = d["tz"].as<String>();
     if (d["weather"].is<const char*>()) cfg.weather = d["weather"].as<String>();
@@ -304,7 +315,9 @@ static void apply_config_json(const String& js) {
     if (d["lip_sync"].is<bool>())   cfg.lip_sync  = d["lip_sync"].as<bool>();
     save_config();
     voice_begin(cfg);
+    // ACK before speak so the web UI unblocks even if audio is slow/broken
     Serial.println("FOX_CONFIG_OK");
+    Serial.flush();
     speak(String("thanks! i'm ") + cfg.name + " now~");
 }
 

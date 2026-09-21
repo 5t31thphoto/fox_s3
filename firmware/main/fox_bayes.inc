@@ -113,12 +113,16 @@ void game_bayes_twenty() {
         }
         if (best < 0) break;
         asked[best] = true;
+        face_caption(String(QTEXT[best]) + "  (click=yes shake=no)");
         speak(QTEXT[best]);
-        bool yes = input_wait_yes(2600);
+        bool yes = input_wait_yes(8000);
         update(best, yes);
+        face_caption(yes ? "yes" : "no");
+        delay(300);
     }
-    int t = top();
-    speak(String("my best guess is... ") + ENT[t].name + "?");
-    if (input_wait_yes(2600)) speak("got it! hehe");
+    int ti = top();
+    face_caption(String("guess: ") + ENT[ti].name + "?");
+    speak(String("my best guess is... ") + ENT[ti].name + "?");
+    if (input_wait_yes(8000)) speak("got it! hehe");
     else speak("aw, you win! you stumped me~");
 }

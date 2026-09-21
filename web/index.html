@@ -190,7 +190,7 @@
         <textarea id="pers">playful, curious, warm, a little mischievous</textarea></div>
       <div><label for="ssid">Wifi network <span class="hint">(optional)</span></label><input id="ssid" placeholder="leave blank for offline"></div>
       <div><label for="pass">Wifi password</label><input id="pass" type="password"></div>
-      <div><label for="weather">Weather city <span class="hint">(optional)</span></label><input id="weather" placeholder="Denver"></div>
+      <div><label for="weather">City or ZIP <span class="hint">(weather &amp; aurora)</span></label><input id="weather" placeholder="ZIP or city" placeholder="Denver"></div>
       <div><label for="volume">Volume</label><input id="volume" type="range" min="0" max="110" value="70"></div>
       <div class="full"><label for="key">Online brain API key <span class="hint">(optional — Groq free tier works great)</span></label><input id="key" type="password" placeholder="gsk_…"></div>
       <div><label for="cmodel">Chat model</label><input id="cmodel" value="llama-3.1-8b-instant"></div>
@@ -362,7 +362,7 @@
       let nl;
       while((nl=buf.indexOf('\n'))>=0){
         const line=buf.slice(0,nl).trim(); buf=buf.slice(nl+1);
-        if(line==='FOX_CONFIG_OK'){ echo.innerHTML='<span class="ok">Your fox has its new identity. Say hi! 🦊</span>'; }
+        if(line.indexOf('FOX_CONFIG_OK')>=0){ echo.innerHTML='<span class="ok">Your fox has its new identity. Say hi! 🦊</span>'; }
         else if(line) echo.textContent = line;
       }
     }
@@ -392,7 +392,7 @@
     const line=JSON.stringify(cfg)+'\n';
     await writer.write(new TextEncoder().encode(line));
     status.innerHTML='<span class="ok">sent ✓</span>';
-    echo.textContent='…fox is thinking about its new name…';
+    echo.textContent='…sending config over USB serial (wait for FOX_CONFIG_OK)…';
   };
 
   const val=id=>document.getElementById(id).value.trim();

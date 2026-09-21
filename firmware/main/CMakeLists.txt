@@ -15,10 +15,14 @@ idf_component_register(
         "fox_memory.cpp"
         "fox_llm.cpp"
         "fox_sam.c"
+        "sam/sam.c"
+        "sam/reciter.c"
+        "sam/render.c"
+        "sam/esp8266sam_debug.c"
         "fox_audio.cpp"
         "echobase/M5EchoBase.cpp"
         "echobase/es8311.cpp"
-    INCLUDE_DIRS "." "echobase"
+    INCLUDE_DIRS "." "echobase" "sam"
 )
 
 # Our style uses some compact one-liners and cross-TU helpers that the IDF
@@ -36,4 +40,8 @@ target_compile_options(${COMPONENT_LIB} PRIVATE
     -Wno-error=sign-compare
     -Wno-error=narrowing
     -Wno-error=type-limits
+    -Wno-error=implicit-function-declaration
+    -Wno-error=incompatible-pointer-types
+    -Wno-error=int-conversion
+    -Wno-error=absolute-value
 )

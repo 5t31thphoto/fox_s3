@@ -128,24 +128,63 @@ void face_draw(FoxMood mood) {
         face_canvas->fillEllipse(64, 88, 7, 2 + mo, eye);
     }
 
-    // caption bar
-    if (caption.length() && millis() < caption_until && face_cfg->captions) {
-        face_canvas->fillRect(0, 112, 128, 16, 0x0000);
+    // Caption: up to 3 wrapped lines at bottom (128px ≈ 21 chars/line at size 1)
+    if (caption.length() && millis() < caption_until && face_cfg && face_cfg->captions) {
+        face_canvas->fillRect(0, 92, 128, 36, 0x0000);
         face_canvas->setTextColor(0xFFFF);
         face_canvas->setTextSize(1);
-        face_canvas->drawString(caption.substring(0, 20), 64, 120);
+        face_canvas->setTextDatum(top_left);
+        String s = caption;
+        int y = 94;
+        for (int line = 0; line < 3 && s.length(); ++line) {
+            int take = 21;
+            if ((int)s.length() <= take) {
+                face_canvas->drawString(s, 2, y);
+                break;
+            }
+            // break on last space before take if possible
+            int br = take;
+            for (int i = take; i > 8; --i) {
+                if (s[i] == ' ') { br = i; break; }
+            }
+            face_canvas->drawString(s.substring(0, br), 2, y);
+            s = s.substring(br);
+            while (s.length() && s[0] == ' ') s = s.substring(1);
+            y += 11;
+        }
+        face_canvas->setTextDatum(middle_center);
     }
     face_canvas->pushSprite(0, 0);
 }
 
 // Called every loop to animate idle motion (blink, ear wiggle).
+// Throttle redraws: full pushSprite every loop tears on AtomS3R (flicker).
 void face_tick(FoxMood mood) {
+    static uint32_t last_draw = 0;
+    static float last_mouth = -1;
+    static int last_blink = -1;
+    static int last_ear = -1;
+    static FoxMood last_mood = (FoxMood)-1;
+    uint32_t now = millis();
+
     if (++blink_timer > 220) { blinking = true; }
     if (blink_timer > 230)   { blinking = false; blink_timer = 0; }
     if ((blink_timer & 7) == 0) ear_wiggle++;
     // decay mouth toward closed when not actively driven
-    mouth_open *= 0.7f;
+    mouth_open *= 0.85f;
+
+    bool due = (now - last_draw) >= 66;  // ~15 fps max
+    bool changed = (blinking != last_blink) || (ear_wiggle != last_ear)
+                || (mood != last_mood) || ((mouth_open > last_mouth ? mouth_open - last_mouth : last_mouth - mouth_open) > 0.04f)
+                || (caption.length() && millis() < caption_until);
+    if (!due && !changed) return;
+
     face_draw(mood);
+    last_draw = now;
+    last_mouth = mouth_open;
+    last_blink = blinking;
+    last_ear = ear_wiggle;
+    last_mood = mood;
 }
 
 void face_caption(const String& text) {

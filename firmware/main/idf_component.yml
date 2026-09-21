@@ -38,5 +38,6 @@ dependencies:
   ## solving and cannot cause the "doesn't match any versions" error again. If
   ## the checkout fails for any reason, remove this block — the build stays green
   ## and the fox uses the SAM "critter" voice instead.
-  # esp-picotts:
-  #   git: https://github.com/jmattsson/esp-picotts.git
+  # PicoTTS — real offline speech (chatterbox). Git dep, not registry.
+  esp-picotts:
+    git: https://github.com/jmattsson/esp-picotts.git

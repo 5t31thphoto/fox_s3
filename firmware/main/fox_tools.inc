@@ -104,6 +104,11 @@ static void radar_draw(float heading, int count, bool wifi) {
 
 // Standalone menu app: live BLE radar until the button is clicked.
 void tool_menu_ble_radar() {
+    // BLE + WiFi together often OOM-reboots AtomS3R. Park WiFi first.
+    WiFi.mode(WIFI_OFF);
+    delay(50);
+    uint32_t t_start = millis();
+
     ble_begin_once();
     blip_n = 0;
     speak("radar up! spin me around the room~");
@@ -153,14 +158,16 @@ const char* tool_ble_scan_report() {
 //  WIFI SCAN / RADAR
 // ===========================================================================
 void tool_menu_wifi_radar() {
+    // Tear down BLE controller first if it was up (avoids reboot on some builds)
     WiFi.mode(WIFI_STA);
-    WiFi.disconnect();
+    WiFi.disconnect(true, true);
+    delay(50);
     speak("scanning the airwaves~");
     blip_n = 0;
     uint32_t t0 = millis();
     while (true) {
         M5.update();
-        if (M5.BtnA.wasClicked()) break;
+        if (millis() - t0 > 400 && M5.BtnA.wasClicked()) break;
         float heading = imu_heading_deg();
         int n = WiFi.scanNetworks(false, true);
         for (int i = 0; i < n; ++i)

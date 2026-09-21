@@ -158,6 +158,7 @@ void voice_say(const String& text, FoxMood mood) {
         spoke = sam_say(text);
     }
     if (!spoke) {
+        Serial.println("FOX: TTS failed — babble fallback only");
         voice_babble(mood, syllable_estimate(text));
     }
 }

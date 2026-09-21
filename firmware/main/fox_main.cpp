@@ -587,19 +587,31 @@ static void process_utterance(int16_t* audio, size_t n) {
         speak("i'll remember this moment~");
         return;
     }
-    // Try offline command grammar first (works with no network).
+    // Offline command grammar first (needs model partition + Multinet).
+    if (!speech_ready) {
+        Serial.println("FOX: utterance ignored — offline speech not ready (model?)");
+        face_caption("no offline hearing");
+        speak("i can't hear commands offline until the speech model is flashed");
+        return;
+    }
     int id = recognize_offline(audio, n);
+    Serial.printf("FOX: offline recognize id=%d samples=%u\n", id, (unsigned)n);
     if (id >= 0) {
         for (size_t i = 0; i < COMMAND_COUNT; ++i)
             if (COMMANDS[i].id == id) { do_action(COMMANDS[i].action); return; }
     }
-    // Not a known command: if cloud is on, transcribe + chat; else reflect.
+    // Not a known command
     if (cfg.cloud_enabled) {
-        String t = cloud_transcribe(audio, n);
-        handle_free_text(t);
+        String tx = cloud_transcribe(audio, n);
+        if (tx.length()) handle_free_text(tx);
+        else {
+            face_caption("didn't catch that");
+            speak("i didn't catch a command. try say status, or scan, or play a game");
+        }
     } else {
-        // Offline and unrecognised: acknowledge without pretending to understand.
-        speak(fox_reflect(""));
+        // Do NOT fox_reflect empty — that pretends to understand.
+        face_caption("no command matched");
+        speak("i didn't catch a command. try: status, scan wifi, ble radar, play wormhole");
     }
 }
 
@@ -691,10 +703,13 @@ void setup() {
     // buffers and needs the MultiNet model flashed to the `model` partition. If
     // that partition wasn't flashed (e.g. app-only web flash) init returns false
     // and the fox still runs everything else — it just won't do offline grammar.
-    if (!init_speech())
-        Serial.println("FOX: offline speech unavailable (model not flashed?) — running without it");
-    else
-        Serial.println("FOX: speech ok");
+    if (!init_speech()) {
+        Serial.println("FOX: offline speech UNAVAILABLE — check model partition in web flash manifest");
+        face_caption("no speech model");
+    } else {
+        Serial.println("FOX: offline speech READY");
+        face_caption("speech ready");
+    }
 
     // Radios: only power down when there is no cloud use. (Do NOT btStop() —
     // BLE tools need the controller; stopping it here would break BLE radar.)

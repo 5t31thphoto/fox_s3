@@ -55,9 +55,21 @@ String net_space_weather() {
 // user's latitude (from cfg.weather geocode is overkill, so we accept a rough
 // hemisphere hint). Honest scope: this is a heuristic headline, not a model.
 String net_aurora() {
+    String loc = cfg.weather.length() ? cfg.weather : String("your area");
     String sw = net_space_weather();
-    // If a storm is flagged, encourage the human to look up.
-    if (sw.indexOf("storm") >= 0 || sw.indexOf("active") >= 0)
-        return sw + " go look north, you might catch the lights!";
-    return sw + " probably no aurora tonight, though.";
+    // Heuristic: higher Kp + mid/high latitude zip-ish hints (first digit 5-9 US / high lat)
+    bool northish = true;
+    if (cfg.weather.length() >= 1) {
+        char c = cfg.weather[0];
+        // crude: US zip starting 0-3 more southern; still show Kp honestly
+        if (c >= '0' && c <= '3') northish = false;
+    }
+    if (sw.indexOf("storm") >= 0) {
+        if (northish)
+            return "for " + loc + ": " + sw + " good chance of aurora — look toward the pole!";
+        return "for " + loc + ": " + sw + " aurora possible farther north; still worth a glance!";
+    }
+    if (sw.indexOf("active") >= 0)
+        return "for " + loc + ": " + sw + " marginal aurora odds.";
+    return "for " + loc + ": " + sw + " probably no aurora tonight.";
 }

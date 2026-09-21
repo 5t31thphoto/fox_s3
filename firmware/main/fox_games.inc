@@ -9,6 +9,19 @@
 extern M5Canvas* face_canvas;
 extern FoxConfig cfg;
 
+// Ignore the click that *started* the game (still latched in M5.BtnA).
+static bool game_btn_exit(uint32_t started_ms) {
+    if (millis() - started_ms < 450) {
+        // drain so wasClicked/wasDoubleClicked go false
+        (void)M5.BtnA.wasClicked();
+        (void)M5.BtnA.wasDoubleClicked();
+        return false;
+    }
+    if (M5.BtnA.wasDoubleClicked()) { g_goto_menu = true; return true; }
+    if (M5.BtnA.wasClicked()) return true;
+    return false;
+}
+
 // small tilt reader: returns roll/pitch in ~[-1,1]
 void tilt_xy(float* rx, float* ry) {
     float ax, ay, az;
@@ -21,61 +34,78 @@ void tilt_xy(float* rx, float* ry) {
 //  WORMHOLE — fly your ship through shrinking rings by tilting the device.
 // ===========================================================================
 void game_wormhole() {
+    uint32_t t_start = millis();
     speak("hold tight, into the wormhole!");
-    int score = 0; float ship_x = 64, ship_y = 64;
-    // rings approach from the center outward (illusion of travel)
-    struct Ring { float r; float cx, cy; bool passed; };
-    const int NR = 5; Ring rings[NR];
-    for (int i = 0; i < NR; ++i) rings[i] = { 8.0f + i * 22, 64, 64, false };
-    uint32_t t0 = millis(); int lives = 3;
-    while (lives > 0) {
+    face_caption("tilt to steer — click to exit");
+    float ship_x = 64, ship_y = 100;
+    int score = 0, lives = 3;
+    // tunnel rings: z grows toward camera
+    struct Ring { float z; float cx, cy; };
+    const int NR = 8;
+    Ring rings[NR];
+    for (int i = 0; i < NR; ++i) {
+        rings[i].z = 20.f + i * 18.f;
+        rings[i].cx = 64 + (int)(esp_random() % 21) - 10;
+        rings[i].cy = 64 + (int)(esp_random() % 21) - 10;
+    }
+    uint32_t last = millis();
+    while (lives > 0 && millis() - t_start < 90000) {
         M5.update();
-        if (M5.BtnA.wasDoubleClicked()) { g_goto_menu = true; break; }
-        if (M5.BtnA.wasClicked()) break;
+        if (game_btn_exit(t_start)) break;
         float rx, ry; tilt_xy(&rx, &ry);
-        ship_x = constrain(ship_x + rx * 6, 8, 120);
-        ship_y = constrain(ship_y + ry * 6, 8, 120);
+        ship_x = constrain(ship_x + rx * 5.5f, 12, 116);
+        ship_y = constrain(ship_y + ry * 5.5f, 40, 118);
+
+        float dt = (millis() - last) / 1000.f;
+        if (dt < 0.01f) dt = 0.01f;
+        last = millis();
+
         face_canvas->fillSprite(0x0000);
-        // starfield
-        for (int i = 0; i < 24; ++i) {
-            int sx = (i * 53 + (millis() / 20)) % 128;
-            int sy = (i * 31) % 128;
-            face_canvas->drawPixel(sx, sy, 0x39C7);
+        // starfield parallax
+        for (int i = 0; i < 40; ++i) {
+            int sx = (i * 97 + (int)(millis() / 8)) % 128;
+            int sy = (i * 53 + (int)(millis() / 12)) % 128;
+            face_canvas->drawPixel(sx, sy, 0x8410);
         }
-        // rings grow toward viewer; passing plane at r>54 scores/misses
+        // rings from far to near
         for (int i = 0; i < NR; ++i) {
-            rings[i].r += 0.9f;
-            uint16_t c = cfg.color_primary;
-            face_canvas->drawCircle(64, 64, (int)rings[i].r, c);
-            face_canvas->drawCircle(64, 64, (int)rings[i].r + 1, c);
-            if (!rings[i].passed && rings[i].r > 52) {
-                rings[i].passed = true;
-                // did the ship sit inside the ring's gap (near center-ish)?
-                float d = hypotf(ship_x - 64, ship_y - 64);
-                if (d < 26) { score++; }
-                else { lives--; }
-                rings[i].r = 8; rings[i].passed = false;   // recycle
+            rings[i].z -= 28.f * dt;
+            if (rings[i].z < 4.f) {
+                // missed / scored
+                float dx = ship_x - rings[i].cx;
+                float dy = ship_y - rings[i].cy;
+                if (dx*dx + dy*dy < 22*22) score += 1;
+                else { lives -= 1; }
+                rings[i].z = 20.f + (NR - 1) * 18.f;
+                rings[i].cx = 64 + (int)(esp_random() % 31) - 15;
+                rings[i].cy = 58 + (int)(esp_random() % 25) - 12;
             }
+            float sc = 80.f / rings[i].z;
+            int r = (int)(sc * 10);
+            if (r < 3) r = 3;
+            if (r > 60) r = 60;
+            uint16_t col = rings[i].z < 12 ? 0xF800 : (rings[i].z < 30 ? 0xFFE0 : 0x07FF);
+            face_canvas->drawCircle((int)rings[i].cx, (int)rings[i].cy, r, col);
+            face_canvas->drawCircle((int)rings[i].cx, (int)rings[i].cy, r - 1, col);
         }
         // ship
-        face_canvas->fillTriangle(ship_x, ship_y - 6, ship_x - 5, ship_y + 5,
-                                  ship_x + 5, ship_y + 5, cfg.color_accent);
-        // hud
-        face_canvas->setTextColor(0xFFFF); face_canvas->setTextDatum(top_left);
-        face_canvas->drawString("score " + String(score), 4, 2);
-        face_canvas->setTextDatum(top_right);
-        face_canvas->drawString(String(lives) + " <3", 124, 2);
+        face_canvas->fillTriangle((int)ship_x, (int)ship_y - 6,
+                                  (int)ship_x - 6, (int)ship_y + 6,
+                                  (int)ship_x + 6, (int)ship_y + 6, 0xFFFF);
+        face_canvas->setTextDatum(top_left);
+        face_canvas->setTextColor(0xFFFF);
+        face_canvas->setTextSize(1);
+        face_canvas->drawString(String("sc ") + score + "  hp " + lives, 2, 2);
         face_canvas->pushSprite(0, 0);
-        if (millis() - t0 > 60000) break;
-        delay(16);
+        delay(16);  // ~60fps eye candy without tearing as bad as unbounded
     }
-    speak(String("nice flying! ") + score + " rings cleared~");
+    face_caption(String("wormhole score ") + score);
+    speak(String("score ") + score + "!");
 }
 
-// ===========================================================================
-//  CATCH — tilt to move a basket and catch falling treats.
-// ===========================================================================
+
 void game_catch() {
+    uint32_t t_start = millis();
     speak("catch the treats! tilt to move~");
     float basket = 64; int score = 0, misses = 0;
     struct Drop { float x, y, v; bool live; };
@@ -84,8 +114,7 @@ void game_catch() {
     uint32_t t0 = millis();
     while (misses < 5) {
         M5.update();
-        if (M5.BtnA.wasDoubleClicked()) { g_goto_menu = true; break; }
-        if (M5.BtnA.wasClicked()) break;
+        if (game_btn_exit(t_start)) break;
         float rx, ry; tilt_xy(&rx, &ry);
         basket = constrain(basket + rx * 8, 12, 116);
         face_canvas->fillSprite(cfg.color_bg);

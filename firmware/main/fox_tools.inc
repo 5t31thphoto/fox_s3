@@ -112,10 +112,10 @@ void tool_menu_ble_radar() {
     ble_begin_once();
     blip_n = 0;
     speak("radar up! spin me around the room~");
-    uint32_t t0 = millis();
     while (true) {
         M5.update();
-        if (M5.BtnA.wasClicked()) break;
+        if (millis() - t_start > 450 && M5.BtnA.wasClicked()) break;
+        if (millis() - t_start > 120000) break;
         float heading = imu_heading_deg();
         // short scan burst; attribute results to the current heading
         BLEScanResults* res = ble_scan->start(1, false);
@@ -128,7 +128,6 @@ void tool_menu_ble_radar() {
         }
         ble_scan->clearResults();
         radar_draw(heading, blip_n, false);
-        if (millis() - t0 > 120000) break;   // auto-exit after 2 min
     }
     speak(String("i found ") + blip_n + " gadgets nearby");
 }

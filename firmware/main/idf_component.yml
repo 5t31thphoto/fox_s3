@@ -32,3 +32,4 @@ dependencies:
   espressif/arduino-esp32: "3.3.7"
   # JSON for cloud chat/transcription payloads and USB config parsing.
   bblanchon/arduinojson: "^7.0.0"
+  jmattsson/picotts: "1.1.3"

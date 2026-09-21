@@ -286,7 +286,6 @@ void tool_menu_ble_radar() { radar_run(false); }
 const char* tool_ble_scan_report() {
     static char buf[220];
     ble_begin_once();
-    if (!ble_scan) return "{\"ble_devices\":0,\"closest\":\"\",\"rssi\":-999}";
     BLEScanResults* res = ble_scan->start(3, false);
     int n = res ? res->getCount() : 0, strongest = -999; String who = "";
     for (int i = 0; i < n; ++i) {

@@ -59,26 +59,9 @@ void face_splash(FoxConfig& c) {
         face_canvas->fillCircle(55, 44, 3, 0x0000);
         face_canvas->fillCircle(73, 44, 3, 0x0000);
         face_canvas->fillTriangle(60, 52, 68, 52, 64, 57, 0x0000);
-        // name / splash text: wrap by measured pixel width, never crop a word.
-        face_canvas->setTextColor(0xFFFF); face_canvas->setTextSize(1);
-        face_canvas->setTextDatum(top_left);
-        String rem = txt; int lines = 0;
-        for (int y = 106; lines < 2 && rem.length(); ++lines) {
-            int br = rem.length();
-            while (br > 1 && face_canvas->textWidth(rem.substring(0, br)) > 124) {
-                --br;
-                if (br > 0 && rem[br] == ' ') break;
-            }
-            if (br < (int)rem.length()) {
-                int sp = rem.lastIndexOf(' ', br - 1);
-                if (sp > 0) br = sp;
-            }
-            String line = rem.substring(0, br); line.trim();
-            face_canvas->drawString(line, 2, y);
-            rem = rem.substring(br); rem.trim();
-            y += 11;
-        }
-        face_canvas->setTextDatum(middle_center);
+        // name / splash text
+        face_canvas->setTextColor(0xFFFF); face_canvas->setTextDatum(bottom_center);
+        face_canvas->drawString(txt.substring(0, 20), 64, 118);
         face_canvas->pushSprite(0, 0);
         frame++;
         delay(40);
@@ -145,7 +128,7 @@ void face_draw(FoxMood mood) {
         face_canvas->fillEllipse(64, 88, 7, 2 + mo, eye);
     }
 
-    // Caption: wrap by actual rendered width, not a guessed character count.
+    // Caption: up to 3 wrapped lines at bottom (128px ≈ 21 chars/line at size 1)
     if (caption.length() && millis() < caption_until && face_cfg && face_cfg->captions) {
         face_canvas->fillRect(0, 92, 128, 36, 0x0000);
         face_canvas->setTextColor(0xFFFF);
@@ -154,15 +137,19 @@ void face_draw(FoxMood mood) {
         String s = caption;
         int y = 94;
         for (int line = 0; line < 3 && s.length(); ++line) {
-            int br = s.length();
-            while (br > 1 && face_canvas->textWidth(s.substring(0, br)) > 124) --br;
-            if (br < (int)s.length()) {
-                int sp = s.lastIndexOf(' ', br - 1);
-                if (sp > 0) br = sp;
+            int take = 21;
+            if ((int)s.length() <= take) {
+                face_canvas->drawString(s, 2, y);
+                break;
             }
-            String out = s.substring(0, br); out.trim();
-            face_canvas->drawString(out, 2, y);
-            s = s.substring(br); s.trim();
+            // break on last space before take if possible
+            int br = take;
+            for (int i = take; i > 8; --i) {
+                if (s[i] == ' ') { br = i; break; }
+            }
+            face_canvas->drawString(s.substring(0, br), 2, y);
+            s = s.substring(br);
+            while (s.length() && s[0] == ' ') s = s.substring(1);
             y += 11;
         }
         face_canvas->setTextDatum(middle_center);
@@ -218,9 +205,10 @@ void face_set_mouth(float level01) {
 // ---- real FFT mic lip-sync (ported from m5stack-avatar-mic) -----------------
 // A dedicated mode: the fox opens its mouth in time with sound it hears through
 // the Echo Base mic, using the same FFT-bin-sum → ratio trick as the reference
-// avatar. Runs until the button is double-clicked. Great as a "puppet" / reactive mode.
+// avatar. Runs until the button is clicked. Great as a "puppet" / reactive mode.
 #include "fft.hpp"
-static fft_t s_fft;
+#include <new>
+static fft_t* s_fft = nullptr;
 static int16_t* s_wave = nullptr;
 static float s_lip_max = 10.0f;
 static uint32_t s_last_loud = 0;
@@ -229,13 +217,18 @@ static uint32_t s_last_loud = 0;
 
 static void face_lipsync_from_mic_once() {
     static constexpr size_t WAVE = 256 * 2;
+    if (!s_fft) {
+        void* mem = heap_caps_malloc(sizeof(fft_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!mem) return;
+        s_fft = new (mem) fft_t();
+    }
     if (!s_wave) s_wave = (int16_t*)heap_caps_malloc(WAVE * sizeof(int16_t),
                                                      MALLOC_CAP_8BIT);
     if (!s_wave) return;
     uint64_t level = 0;
     if (g_echo_ok && audio_record(s_wave, WAVE)) {
-        s_fft.exec(s_wave);
-        for (size_t bx = 5; bx <= 60; ++bx) { int32_t f = s_fft.get(bx); level += (f < 0 ? -f : f); }
+        s_fft->exec(s_wave);
+        for (size_t bx = 5; bx <= 60; ++bx) { int32_t f = s_fft->get(bx); level += (f < 0 ? -f : f); }
     }
     uint32_t tl = level >> 11;                    // shift → mouth scale
     float ratio = (float)tl / s_lip_max;
@@ -255,7 +248,7 @@ void face_lipsync_mode() {
     if (!g_echo_ok) return;
     while (true) {
         M5.update();
-        if (M5.BtnA.wasDoubleClicked()) break;
+        if (M5.BtnA.wasClicked()) break;
         face_lipsync_from_mic_once();
         face_draw(MOOD_HAPPY);
         delay(1);

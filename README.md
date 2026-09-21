@@ -7,7 +7,7 @@ wifi and a free API key, it grows an online brain too. But the online part is a
 *bonus*, never a requirement.
 
 There is **no wake word**. You talk to the fox by holding its button
-(push-to-talk). A quick tap belongs to the foreground app/character; a double tap opens its menu. It can also enter a hands-free
+(push-to-talk). A quick tap opens its menu. It can also enter a hands-free
 "conversation mode" that listens for a while and times out on silence.
 
 ---
@@ -24,7 +24,7 @@ aurora tonight?", "play wormhole").
 
 **Flipper-style hacker tools.**
 - **BLE radar** — rotate the device and nearby Bluetooth devices plot around a
-  rotational RSSI sweep: follow the red target needle with the green IMU needle; sources are plotted relative to Fox.
+  sweep by bearing (IMU magnetometer), blip radius ~ signal strength.
 - **WiFi radar** — same, for access points.
 - **Passive packet sniffer** — a receive-only channel hopper with a live
   mgmt/data/ctrl frame scope. Transmits nothing.
@@ -113,24 +113,22 @@ app plus the data partitions at the offsets in `firmware/partitions.csv`.
 
 ---
 
-## Brain packs (alternative offline builds)
+## Brain packs (swappable at flash time)
 
 | Pack | Voice | On-device brain | Feel |
 |------|-------|-----------------|------|
-| **A — Chatterbox** (default) | PicoTTS, pitched up | 64d / 160h / 4-layer int8 | Clear speech; friendliest default |
-| **B — Critter** | SAM retro voice | 72d / 192h / 6-layer packed int4 | More cognitive room; chirpy retro voice |
+| **A — Chatterbox** (default) | PicoTTS, pitched up | ~200K params | Speaks clear words; friendliest default |
+| **B — Critter** | procedural formant synth | ~700K params | Chirpy little creature; more character |
 
-A and B use the same Fox character/world and the same firmware. They are
-alternative flash builds because the AtomS3R's 8MB layout has one offline-brain
-slot. Online chat is a further, much larger brain rather than a different
-character.
+Both are flashed; you can switch from the fox's on-device menu. Captions show
+either way.
 
 ---
 
 ## The on-device brain, honestly
 
 The brain is a real llama-style transformer (RMSNorm + RoPE + attention +
-SwiGLU, compact quantised weights) trained **from scratch in pure numpy** — no PyTorch — by
+SwiGLU, int8 weights) trained **from scratch in pure numpy** — no PyTorch — by
 `tools/train_brain.py`, so it builds on a plain CI runner in ~20–30 s. It reaches
 cross-entropy ~0.2 and generates lines like:
 
@@ -189,7 +187,7 @@ firmware/                ESP-IDF (Arduino-as-component) app
     fox_face.inc         animated face + caption + lip-sync hooks
     fox_input.inc        PTT capture, IMU gestures, menu, USB config, sleep
     data/                built FOXB/FOXI blobs land here
-  partitions.csv         8MB layout (app, models, PicoTTS, foxbrain, foxdata, foxfs)
+  partitions.csv         8MB layout (app, speech model, PicoTTS TA/SG, brain, IR data, journal)
   sdkconfig.defaults     esp32s3, PSRAM, MultiNet7, no wakenet, USB-CDC
 tools/
   build_ir.py            Flipper .ir  -> FOXI binary
@@ -217,3 +215,10 @@ See `docs/LIMITATIONS.md`. Highlights: PicoTTS "cuteness" is prosody-limited and
 best confirmed on real hardware; the "critter" voice is an **original** synth,
 not the licensing-murky reverse-engineered SAM; MultiNet phrases may need tuning
 for your accent; the on-device brain is a toy by design.
+
+
+## 8MB flash layout
+
+The firmware uses a fixed 8MB map. PicoTTS language resources are **not embedded in `fox.bin`**; the EN-US TA and SG blobs occupy dedicated `picotts_ta` and `picotts_sg` partitions. This keeps the factory app partition at 0x360000 while leaving room for the offline speech model, Brain A/B, the 196KB IR library, and the LittleFS journal.
+
+Brain B is intentionally trained as the compact on-device variant (`80-wide`, `160` FFN, `3` layers, `5` heads). It is still larger than Brain A and fits the 0x40000 `foxbrain` partition. The CI data job regenerates both brain packs, so generated `.bin` files are not source artifacts.

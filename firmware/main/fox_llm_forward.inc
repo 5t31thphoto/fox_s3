@@ -21,8 +21,9 @@
 //   Q8   wcls          (vocab x dim)  [present only if shared_cls == 0]
 //   vocab blob: for i in vocab: fp32 score, u16 len, bytes[len]
 //
-// Q8: int8 q[rows*cols] + fp32 scales.
-// Q4: two signed 4-bit weights per byte + fp16 scales per group.
+// A Q8 matrix of shape (rows x cols) is stored as:
+//   int8 q[rows * cols]     row-major
+//   fp32 s[rows * cols/gs]  one scale per group of gs along the row
 //
 // Everything is pointer arithmetic into the mmap; no weight copies to RAM.
 
@@ -34,17 +35,9 @@ struct Cursor {
     explicit Cursor(const uint8_t* base) : p(base) {}
     const float* f32(size_t n) { const float* r = (const float*)p; p += n * 4; return r; }
     QTensor q8(size_t rows, size_t cols, int gs) {
-        QTensor t{};
-        t.q = p; p += rows * cols;
-        t.s = (const float*)p; p += (rows * cols / gs) * 4;
-        t.s16 = nullptr;
-        return t;
-    }
-    QTensor q4(size_t rows, size_t cols, int gs) {
-        QTensor t{};
-        t.q = p; p += rows * cols / 2;
-        t.s = nullptr;
-        t.s16 = (const uint16_t*)p; p += (rows * cols / gs) * 2;
+        QTensor t;
+        t.q = (const int8_t*)p; p += rows * cols;
+        t.s = (const float*)p;  p += (rows * cols / gs) * 4;
         return t;
     }
 };
@@ -58,7 +51,6 @@ struct Weights {
     QTensor* wq; QTensor* wk; QTensor* wv; QTensor* wo;
     QTensor* w1; QTensor* w2; QTensor* w3;
     QTensor  wcls;
-    bool q4 = false;
     bool resolved = false;
 } W;
 
@@ -66,7 +58,6 @@ static void resolve_weights() {
     if (W.resolved) return;
     const Header& h = M.h;
     int dim = h.dim, hidden = h.hidden, L = h.n_layers, gs = h.group_size;
-    W.q4 = (h.reserved[0] == 4);
     int kvdim = (dim * h.n_kv_heads) / h.n_heads;
     Cursor c(M.base + sizeof(Header));
     W.tok_emb   = c.f32((size_t)h.vocab * dim);
@@ -77,22 +68,20 @@ static void resolve_weights() {
                                      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT); };
     W.wq = arr(L); W.wk = arr(L); W.wv = arr(L); W.wo = arr(L);
     W.w1 = arr(L); W.w2 = arr(L); W.w3 = arr(L);
-    auto qmat = [&](size_t rows, size_t cols) {
-        return W.q4 ? c.q4(rows, cols, gs) : c.q8(rows, cols, gs);
-    };
-    for (int l = 0; l < L; ++l) W.wq[l] = qmat(dim, dim);
-    for (int l = 0; l < L; ++l) W.wk[l] = qmat(dim, kvdim);
-    for (int l = 0; l < L; ++l) W.wv[l] = qmat(dim, kvdim);
-    for (int l = 0; l < L; ++l) W.wo[l] = qmat(dim, dim);
-    for (int l = 0; l < L; ++l) W.w1[l] = qmat(hidden, dim);
-    for (int l = 0; l < L; ++l) W.w2[l] = qmat(dim, hidden);
-    for (int l = 0; l < L; ++l) W.w3[l] = qmat(hidden, dim);
-    if (!h.shared_cls) W.wcls = qmat(h.vocab, dim);
-    else { W.wcls.q = nullptr; W.wcls.s = nullptr; W.wcls.s16 = nullptr; }
+    for (int l = 0; l < L; ++l) W.wq[l] = c.q8(dim, dim, gs);
+    for (int l = 0; l < L; ++l) W.wk[l] = c.q8(dim, kvdim, gs);
+    for (int l = 0; l < L; ++l) W.wv[l] = c.q8(dim, kvdim, gs);
+    for (int l = 0; l < L; ++l) W.wo[l] = c.q8(dim, dim, gs);
+    for (int l = 0; l < L; ++l) W.w1[l] = c.q8(hidden, dim, gs);
+    for (int l = 0; l < L; ++l) W.w2[l] = c.q8(dim, hidden, gs);
+    for (int l = 0; l < L; ++l) W.w3[l] = c.q8(hidden, dim, gs);
+    if (!h.shared_cls) W.wcls = c.q8(h.vocab, dim, gs);
+    else { W.wcls.q = nullptr; W.wcls.s = nullptr; }
     // vocab blob follows; parse into V
     const uint8_t* vp = c.p;
-    static const char* toks[512];
-    static float scores[512];
+    const char** toks = (const char**)heap_caps_malloc(512 * sizeof(char*), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    float* scores = (float*)heap_caps_malloc(512 * sizeof(float), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!toks || !scores) { if (toks) free(toks); if (scores) free(scores); return; }
     int vs = h.vocab > 512 ? 512 : h.vocab;
     for (int i = 0; i < vs; ++i) {
         scores[i] = *(const float*)vp; vp += 4;
@@ -122,53 +111,18 @@ static void softmax(float* x, int n) {
     for (int i = 0; i < n; ++i) x[i] /= s;
 }
 
-static inline float half_to_float(uint16_t h) {
-    uint32_t sign = (h & 0x8000u) << 16;
-    uint32_t exp = (h >> 10) & 0x1Fu;
-    uint32_t frac = h & 0x03FFu;
-    uint32_t bits;
-    if (exp == 0) {
-        if (!frac) bits = sign;
-        else {
-            float v = ldexpf((float)frac, -24);
-            return sign ? -v : v;
-        }
-    } else if (exp == 31) {
-        bits = sign | 0x7F800000u | (frac << 13);
-    } else {
-        bits = sign | ((exp + 112u) << 23) | (frac << 13);
-    }
-    float out; memcpy(&out, &bits, sizeof(out)); return out;
-}
-
-// out[rows] = W(rows x cols) * x[cols]. Supports the two on-flash formats.
+// out[rows] = W(rows x cols, Q8 grouped) * x[cols]  (x is fp32)
 static void qmatmul(float* out, const float* x, const QTensor& w,
                     int rows, int cols, int gs) {
     for (int r = 0; r < rows; ++r) {
         float acc = 0.f;
-        if (W.q4) {
-            const uint8_t* wq = w.q + (size_t)r * cols / 2;
-            const uint16_t* ws = w.s16 + (size_t)r * (cols / gs);
-            for (int g = 0; g < cols; g += gs) {
-                float scale = half_to_float(ws[g / gs]);
-                float part = 0.f;
-                for (int j = 0; j < gs; ++j) {
-                    uint8_t packed = wq[(g + j) >> 1];
-                    int q = ((j & 1) ? (packed >> 4) : (packed & 0x0F));
-                    if (q & 0x8) q -= 16;
-                    part += (float)q * x[g + j];
-                }
-                acc += part * scale;
-            }
-        } else {
-            const int8_t* wq = (const int8_t*)w.q + (size_t)r * cols;
-            const float* ws = w.s + (size_t)r * (cols / gs);
-            for (int g = 0; g < cols; g += gs) {
-                float scale = ws[g / gs];
-                float part = 0.f;
-                for (int j = 0; j < gs; ++j) part += (float)wq[g + j] * x[g + j];
-                acc += part * scale;
-            }
+        const int8_t* wq = w.q + (size_t)r * cols;
+        const float* ws = w.s + (size_t)r * (cols / gs);
+        for (int g = 0; g < cols; g += gs) {
+            float scale = ws[g / gs];
+            float part = 0.f;
+            for (int j = 0; j < gs; ++j) part += (float)wq[g + j] * x[g + j];
+            acc += part * scale;
         }
         out[r] = acc;
     }

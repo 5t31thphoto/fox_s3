@@ -48,7 +48,7 @@ struct FoxConfig {
     String stt_model    = "whisper-large-v3-turbo";
     String api_base     = "https://api.groq.com/openai/v1";
     String personality  = "playful, curious, warm, a little mischievous";
-    String voice_pack   = "chatterbox";  // PicoTTS when built; else SAM then babble                // "chatterbox" | "critter"
+    String voice_pack   = "chatterbox";  // PicoTTS when available; SAM fallback | "chatterbox" | "critter"
     String splash_text  = "";                          // custom boot splash line
     uint8_t splash_fx   = 0;                            // 0 none,1 sparkle,2 wave,3 rainbow
     uint8_t theme       = 0;                            // preset colour theme index

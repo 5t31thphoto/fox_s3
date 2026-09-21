@@ -18,6 +18,7 @@ static bool game_btn_exit(uint32_t started_ms) {
         return false;
     }
     if (M5.BtnA.wasDoubleClicked()) { g_goto_menu = true; return true; }
+    if (M5.BtnA.wasClicked()) return true;
     return false;
 }
 
@@ -35,7 +36,7 @@ void tilt_xy(float* rx, float* ry) {
 void game_wormhole() {
     uint32_t t_start = millis();
     speak("hold tight, into the wormhole!");
-    face_caption("tilt to steer — double click exits");
+    face_caption("tilt to steer — click to exit");
     float ship_x = 64, ship_y = 100;
     int score = 0, lives = 3;
     // tunnel rings: z grows toward camera

@@ -1,0 +1,242 @@
+name: build-firmware
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+  pull_request:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  data:
+    runs-on: ubuntu-latest
+    outputs:
+      ir_sha: ${{ steps.ir.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Locate sources (self-healing bootstrap)
+        run: |
+          set -e
+          zip=$(ls -t *.zip 2>/dev/null | head -1 || true)
+          if [ -n "$zip" ]; then
+            echo "Expanding $zip"
+            tmp=$(mktemp -d); unzip -oq "$zip" -d "$tmp"
+            entries=$(ls -A "$tmp")
+            if [ "$(echo "$entries" | wc -l)" -eq 1 ] && [ -d "$tmp/$entries" ]; then
+              src="$tmp/$entries"; else src="$tmp"; fi
+            cp -a "$src"/. ./ 2>/dev/null || (cd "$src" && tar cf - . | (cd "$OLDPWD" && tar xf -))
+            rm -rf "$tmp"
+          fi
+          if [ ! -f tools/build_ir.py ]; then
+            found=$(find . -name build_ir.py -path '*/tools/build_ir.py' | head -1 || true)
+            if [ -n "$found" ]; then
+              root=$(dirname "$(dirname "$found")")
+              cp -a "$root"/. ./ 2>/dev/null || (cd "$root" && tar cf - --exclude=.git . | (cd "$GITHUB_WORKSPACE" && tar xf -))
+            fi
+          fi
+          test -f tools/build_ir.py || { echo "::error::tools/build_ir.py not found"; exit 1; }
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install numpy
+        run: pip install "numpy>=1.26"
+      - name: Build IR library (FOXI)
+        id: ir
+        run: |
+          python tools/build_ir.py --out firmware/main/data/fox_ir.bin \
+            --tv assets/ir/tv.ir --audio assets/ir/audio.ir \
+            --projector assets/ir/projector.ir --ac assets/ir/ac.ir
+          echo "sha=$(sha256sum firmware/main/data/fox_ir.bin | cut -c1-16)" >> "$GITHUB_OUTPUT"
+      - name: Train brain packs (FOXB) — CPU numpy, no torch
+        run: |
+          python tools/train_brain.py --pack A --out firmware/main/data/foxbrainA.bin --steps 6000
+          python tools/train_brain.py --pack B --out firmware/main/data/foxbrainB.bin --steps 5000
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fox-data
+          path: firmware/main/data/*.bin
+
+  firmware:
+    needs: data
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Locate sources (self-healing bootstrap)
+        run: |
+          set -e
+          zip=$(ls -t *.zip 2>/dev/null | head -1 || true)
+          if [ -n "$zip" ]; then
+            tmp=$(mktemp -d); unzip -oq "$zip" -d "$tmp"
+            entries=$(ls -A "$tmp")
+            if [ "$(echo "$entries" | wc -l)" -eq 1 ] && [ -d "$tmp/$entries" ]; then
+              src="$tmp/$entries"; else src="$tmp"; fi
+            cp -a "$src"/. ./ 2>/dev/null || (cd "$src" && tar cf - . | (cd "$OLDPWD" && tar xf -))
+            rm -rf "$tmp"
+          fi
+          test -f firmware/CMakeLists.txt || { echo "::error::firmware/ not found at repo root"; exit 1; }
+      - uses: actions/download-artifact@v4
+        with:
+          name: fox-data
+          path: firmware/main/data
+
+      # PicoTTS resources are flashed into dedicated partitions rather than
+      # embedded in fox.bin. That keeps the 8MB factory app partition small.
+      # Acquisition remains best-effort: if unavailable, the local SAM voice
+      # still produces a valid flashable build.
+      - name: Acquire PicoTTS 1.1.3 (best effort, pinned)
+        working-directory: firmware
+        run: |
+          set -u
+          mkdir -p components
+          url='https://github.com/DiUS/esp-picotts/archive/refs/tags/v1.1.3.tar.gz'
+          tmp=$(mktemp -d)
+          if curl -fL --retry 4 --retry-delay 2 --connect-timeout 10 --max-time 120 "$url" -o "$tmp/picotts.tgz"; then
+            rm -rf components/picotts
+            tar -xzf "$tmp/picotts.tgz" -C "$tmp"
+            src=$(find "$tmp" -mindepth 1 -maxdepth 1 -type d -name 'esp-picotts-*' | head -1)
+            test -n "$src" && test -f "$src/CMakeLists.txt"
+            cp -a "$src" components/picotts
+            echo "PicoTTS 1.1.3 installed locally."
+          else
+            echo "::warning::PicoTTS download unavailable; continuing with local SAM voice."
+            rm -rf components/picotts
+          fi
+          rm -rf "$tmp"
+
+      - uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.5.2
+          target: esp32s3
+          path: firmware
+
+      - name: Voice build report
+        run: |
+          test -s firmware/build/fox.bin
+          if [ -f firmware/components/picotts/include/picotts.h ]; then
+            echo "PicoTTS source present; resource partitions will be emitted by the build."
+            test -s "$(find firmware/build -name picotts_ta.bin -print -quit)"
+            test -s "$(find firmware/build -name picotts_sg.bin -print -quit)"
+          else
+            echo "SAM-only fallback build: PicoTTS component was unavailable."
+          fi
+
+      - name: Assemble images + web-flash manifests (offsets from IDF)
+        run: |
+          set -e
+          mkdir -p dist
+          FA=firmware/build/flasher_args.json
+          cp firmware/build/bootloader/bootloader.bin dist/
+          cp firmware/build/partition_table/partition-table.bin dist/
+          cp firmware/build/fox.bin dist/
+          cp firmware/main/data/fox_ir.bin dist/foxdata.bin
+          cp firmware/main/data/foxbrainA.bin dist/foxbrainA.bin
+          cp firmware/main/data/foxbrainB.bin dist/foxbrainB.bin
+          APP_OFFSET=$(python3 -c "import json;d=json.load(open('$FA'));print(int([o for o,f in d['flash_files'].items() if f.endswith('fox.bin')][0],16))")
+          MODEL_REL=$(python3 -c "import json;d=json.load(open('$FA'));print([f for o,f in d['flash_files'].items() if 'srmodels' in f][0])")
+          MODEL_OFFSET=$(python3 -c "import json;d=json.load(open('$FA'));print(int([o for o,f in d['flash_files'].items() if 'srmodels' in f][0],16))")
+          cp "firmware/build/$MODEL_REL" dist/srmodels.bin
+          test -s dist/srmodels.bin
+
+          python3 - <<'PY'
+          import csv, json, os
+          parts={}
+          for row in csv.reader(open('firmware/partitions.csv')):
+              row=[c.strip() for c in row if c.strip()]
+              if row and not row[0].startswith('#'):
+                  parts[row[0]]=(int(row[3],16),int(row[4],16))
+          rows=sorted((off,off+size,name) for name,(off,size) in parts.items())
+          for a,b in zip(rows,rows[1:]):
+              assert a[1] <= b[0], f'partition overlap: {a} -> {b}'
+          assert rows[-1][1] <= 0x800000, hex(rows[-1][1])
+          sizes={name:size for name,(off,size) in parts.items()}
+          expected={
+              'model': os.path.getsize('dist/srmodels.bin'),
+              'foxdata': os.path.getsize('firmware/main/data/fox_ir.bin'),
+              'foxbrainA.bin': os.path.getsize('firmware/main/data/foxbrainA.bin'),
+              'foxbrainB.bin': os.path.getsize('firmware/main/data/foxbrainB.bin'),
+          }
+          for name,n in expected.items():
+              limit=sizes['model'] if name=='model' else sizes['foxdata'] if name=='foxdata' else sizes['foxbrain']
+              assert n <= limit, f'{name} ({n}) exceeds partition ({limit})'
+          print('partition validation: OK')
+          print('factory bytes:', sizes['factory'])
+          print('model bytes:', sizes['model'], 'actual:', expected['model'])
+          print('PicoTA bytes:', sizes['picotts_ta'], 'PicoSG bytes:', sizes['picotts_sg'])
+          print('brain bytes:', sizes['foxbrain'], 'A:', expected['foxbrainA.bin'], 'B:', expected['foxbrainB.bin'])
+          print('foxdata bytes:', sizes['foxdata'], 'actual:', expected['foxdata'])
+          print('flash end:', hex(rows[-1][1]))
+          PY
+
+          FOXBRAIN_OFFSET=$(python3 -c "import csv; print(next(int(r[3],16) for r in csv.reader(open('firmware/partitions.csv')) if r and r[0].strip()=='foxbrain'))")
+          FOXDATA_OFFSET=$(python3 -c "import csv; print(next(int(r[3],16) for r in csv.reader(open('firmware/partitions.csv')) if r and r[0].strip()=='foxdata'))")
+          PICO_TA_OFFSET=$(python3 -c "import csv; print(next(int(r[3],16) for r in csv.reader(open('firmware/partitions.csv')) if r and r[0].strip()=='picotts_ta'))")
+          PICO_SG_OFFSET=$(python3 -c "import csv; print(next(int(r[3],16) for r in csv.reader(open('firmware/partitions.csv')) if r and r[0].strip()=='picotts_sg'))")
+          PICO_PRESENT=0
+          TA_FILE=$(find firmware/build -name picotts_ta.bin -print -quit || true)
+          SG_FILE=$(find firmware/build -name picotts_sg.bin -print -quit || true)
+          if [ -n "$TA_FILE" ] && [ -n "$SG_FILE" ]; then
+            cp "$TA_FILE" dist/picotts_ta.bin
+            cp "$SG_FILE" dist/picotts_sg.bin
+            test $(stat -c%s dist/picotts_ta.bin) -le $((0x0a0000))
+            test $(stat -c%s dist/picotts_sg.bin) -le $((0x0c0000))
+            PICO_PRESENT=1
+          fi
+          cd dist
+          sha256sum * > SHA256SUMS
+          gen() {
+            local brain="$1" out="$2"
+            python3 - "$brain" "$out" "$APP_OFFSET" "$MODEL_OFFSET" "$FOXBRAIN_OFFSET" "$FOXDATA_OFFSET" "$PICO_TA_OFFSET" "$PICO_SG_OFFSET" "$PICO_PRESENT" <<'PY'
+          import json, os, sys
+          brain,out,app,model,broff,data,ta,sg,pico=sys.argv[1:]
+          parts=[
+            {"path":"bootloader.bin","offset":0},
+            {"path":"partition-table.bin","offset":32768},
+            {"path":"fox.bin","offset":int(app)},
+            {"path":"srmodels.bin","offset":int(model)},
+            {"path":brain,"offset":int(broff)},
+            {"path":"foxdata.bin","offset":int(data)},
+          ]
+          if pico == "1":
+              parts += [{"path":"picotts_ta.bin","offset":int(ta)},
+                        {"path":"picotts_sg.bin","offset":int(sg)}]
+          with open(out,"w") as f:
+              json.dump({"name":"Fox Voice Companion","version":"1.0.1","new_install_prompt_erase":True,
+                         "builds":[{"chipFamily":"ESP32-S3","parts":parts}]},f,separators=(',',':'))
+          PY
+          }
+          gen foxbrainA.bin manifest.json
+          gen foxbrainB.bin manifest-b.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fox-firmware
+          path: dist/
+      - name: Publish to Pages (web flasher + firmware)
+        if: github.ref == 'refs/heads/main'
+        run: |
+          mkdir -p site; cp -r web/* site/; cp -r dist site/firmware; touch site/.nojekyll
+      - uses: actions/upload-pages-artifact@v3
+        if: github.ref == 'refs/heads/main'
+        with:
+          path: site
+
+  deploy-pages:
+    if: github.ref == 'refs/heads/main'
+    needs: firmware
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4

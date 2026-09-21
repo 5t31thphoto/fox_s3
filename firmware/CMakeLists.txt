@@ -11,15 +11,3 @@ idf_build_set_property(C_COMPILE_OPTIONS "-Wno-error=stringop-overflow" APPEND)
 idf_build_set_property(C_COMPILE_OPTIONS "-Wno-stringop-overflow" APPEND)
 
 project(fox)
-
-# Belt-and-suspenders: target-specific flags if the component target exists.
-idf_component_get_property(PICOTTS_LIB esp-picotts COMPONENT_LIB)
-if(PICOTTS_LIB)
-    target_compile_options(${PICOTTS_LIB} PRIVATE
-        -Wno-error=stringop-overflow
-        -Wno-stringop-overflow
-        -Wno-error=stringop-overread
-        -Wno-error=format-overflow
-        -Wno-error=array-bounds
-    )
-endif()

@@ -32,12 +32,3 @@ dependencies:
   espressif/arduino-esp32: "^3.0.0"
   # JSON for cloud chat/transcription payloads and USB config parsing.
   bblanchon/arduinojson: "^7.0.0"
-
-  ## OPTIONAL: PicoTTS "chatterbox" voice. Uncomment to include it. Because it's
-  ## a git source (not a registry version), it does NOT go through version
-  ## solving and cannot cause the "doesn't match any versions" error again. If
-  ## the checkout fails for any reason, remove this block — the build stays green
-  ## and the fox uses the SAM "critter" voice instead.
-  # PicoTTS — real offline speech (chatterbox). Git dep, not registry.
-  esp-picotts:
-    git: https://github.com/jmattsson/esp-picotts.git

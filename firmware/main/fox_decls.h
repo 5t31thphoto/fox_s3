@@ -54,7 +54,6 @@ void  tool_menu_ble_radar();
 void  tool_menu_wifi_radar();
 void  tool_menu_sniffer();
 void  tool_menu_probe_sniff();
-void  tool_radio_release();
 const char* tool_ble_scan_report();
 const char* tool_wifi_scan_report();
 
@@ -104,8 +103,6 @@ int16_t*    capture_while_held(size_t* out_n);
 int16_t*    capture_vad_burst(size_t* out_n, uint32_t timeout_ms);
 void        enter_light_sleep();
 void        open_menu();
-void        open_settings();
-void        volume_adjust();
 
 // ---- host glue defined in fox_main.cpp, used by the .inc modules -----------
 void speak(const String& fact);

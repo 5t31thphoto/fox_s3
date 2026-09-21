@@ -40,7 +40,7 @@ struct Header {
     int32_t  reserved[6];
 };
 
-struct QTensor { const uint8_t* q; const float* s; const uint16_t* s16; };  // points into mmap
+struct QTensor { const int8_t* q; const float* s; };  // points into mmap
 
 struct Model {
     Header h{};
@@ -79,9 +79,6 @@ bool load_model() {
     if (memcmp(M.h.magic, "FOXB", 4) != 0 || M.h.version != 1) return false;
     if (M.h.dim <= 0 || M.h.dim > 512 || M.h.n_layers <= 0 || M.h.n_layers > 12)
         return false;
-    if (M.h.reserved[0] != 0 && M.h.reserved[0] != 4) return false;
-    if (M.h.group_size <= 0 || (M.h.dim % M.h.group_size) != 0 ||
-        (M.h.hidden % M.h.group_size) != 0) return false;
 
     // Allocate runtime state in PSRAM.
     auto alloc = [](int n) {

@@ -19,6 +19,7 @@ void enc_pet() {
     while (millis() - t0 < 12000 && strokes < 6) {
         M5.update();
         if (M5.BtnA.wasDoubleClicked()) { g_goto_menu = true; return; }
+        if (M5.BtnA.wasClicked()) break;
         float rx, ry; tilt_xy(&rx, &ry);
         if ((rx > 0.4f && last <= 0) || (rx < -0.4f && last >= 0)) { strokes++; last = rx; }
         face_canvas->fillSprite(cfg.color_bg);
@@ -40,6 +41,7 @@ void enc_feed() {
     while (millis() - t0 < 12000 && fed < 3) {
         M5.update();
         if (M5.BtnA.wasDoubleClicked()) { g_goto_menu = true; return; }
+        if (M5.BtnA.wasClicked()) break;
         float ax, ay, az; M5.Imu.getAccel(&ax, &ay, &az);
         if (ax < -0.7f) {   // an upward flick
             // animate a treat arcing up and the fox catching it
@@ -131,6 +133,7 @@ void game_maze() {
     while (true) {
         M5.update();
         if (M5.BtnA.wasDoubleClicked()) { g_goto_menu = true; return; }
+        if (M5.BtnA.wasClicked()) break;
         float rx, ry; tilt_xy(&rx, &ry);
         // step on a throttle so tilt = steady movement
         if (millis() - lastmove > 180) {

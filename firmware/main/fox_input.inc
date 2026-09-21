@@ -3,8 +3,6 @@
 #pragma once
 #include <esp_sleep.h>
 #include <driver/gpio.h>
-extern FoxConfig cfg;
-#include "fox_audio.h"
 
 // (ButtonEvent and Gesture enums are declared in fox_decls.h)
 
@@ -16,7 +14,7 @@ void input_begin() {
     M5.Imu.begin();
 }
 
-// Distinguish a quick tap from a hold (push-to-talk). We report
+// Distinguish a quick tap (open menu) from a hold (push-to-talk). We report
 // HOLD_START as soon as the press passes PTT_MIN so capture can begin live.
 ButtonEvent input_button_event() {
     bool down = digitalRead((int)USER_GPIO) == LOW;
@@ -35,8 +33,8 @@ ButtonEvent input_button_event() {
 
 static bool button_is_down() { return digitalRead((int)USER_GPIO) == LOW; }
 
-// Double-click anywhere (including inside a game/tool loop) is the universal
-// menu gesture. Games poll this each frame and return early when it fires; the main
+// Double-click anywhere (including inside a game/tool loop) should jump to the
+// menu. Games poll this each frame and return early when it fires; the main
 // loop then opens the menu. Returns true once per double-click.
 bool wants_menu() {
     return M5.BtnA.wasDoubleClicked();
@@ -164,49 +162,12 @@ void enter_light_sleep() {
     face_wake();
 }
 
-enum Flick { FLICK_NONE, FLICK_UP, FLICK_DOWN };
-static Flick input_flick();
-
-// Interactive volume control. Flick up/down adjusts a working value; a single
-// click commits it, while the universal double-click cancels.
-void volume_adjust() {
-    uint8_t working = cfg.volume > 100 ? 100 : cfg.volume;
-    face_canvas->fillSprite(cfg.color_bg);
-    for (;;) {
-        M5.update();
-        Flick f = input_flick();
-        if (f == FLICK_UP) working = (uint8_t)min(100, working + 5);
-        else if (f == FLICK_DOWN) working = (uint8_t)(working >= 5 ? working - 5 : 0);
-
-        face_canvas->fillSprite(cfg.color_bg);
-        face_canvas->setTextDatum(middle_center);
-        face_canvas->setTextColor(cfg.color_accent);
-        face_canvas->drawString("VOLUME", 64, 28);
-        face_canvas->drawRoundRect(12, 50, 104, 16, 4, 0x8410);
-        face_canvas->fillRoundRect(14, 52, (int)(100 * working / 100.0f), 12, 3, cfg.color_primary);
-        face_canvas->setTextColor(0xFFFF);
-        face_canvas->drawString(String(working), 64, 82);
-        face_canvas->setTextColor(0x9CD3);
-        face_canvas->drawString("flick  /  click=save", 64, 106);
-        face_canvas->drawString("double=cancel", 64, 120);
-        face_canvas->pushSprite(0, 0);
-
-        if (M5.BtnA.wasDoubleClicked()) return;
-        if (M5.BtnA.wasClicked()) {
-            cfg.volume = working;
-            audio_set_volume(working);
-            save_config();
-            speak("volume saved~");
-            return;
-        }
-        delay(20);
-    }
-}
-
 // ---- on-device menu (FIX bug #6) -------------------------------------------
 // The menu is navigated by FLICKING the device up or down (per the original
 // control scheme); a button click confirms the highlighted item. This keeps a
 // one-button device fully drivable without awkward tap-counting.
+enum Flick { FLICK_NONE, FLICK_UP, FLICK_DOWN };
+
 static Flick input_flick() {
     float ax, ay, az;
     if (!M5.Imu.getAccel(&ax, &ay, &az)) return FLICK_NONE;
@@ -217,57 +178,6 @@ static Flick input_flick() {
     if (ax >  0.55f) { last = now; return FLICK_DOWN; }
     if (ax < -0.55f) { last = now; return FLICK_UP; }
     return FLICK_NONE;
-}
-
-void open_settings() {
-    struct Setting { const char* label; bool* value; };
-    Setting rows[] = {
-        {"WiFi", &cfg.wifi_enabled},
-        {"BLE", &cfg.ble_enabled},
-        {"IR tools", &cfg.tool_ir},
-        {"IMU", &cfg.tool_imu},
-        {"Captions", &cfg.captions},
-        {"Lip sync", &cfg.lip_sync},
-        {"Memory", &cfg.persistence},
-    };
-    const int N = sizeof(rows) / sizeof(rows[0]);
-    int sel = 0;
-    for (;;) {
-        M5.update();
-        Flick f = input_flick();
-        if (f == FLICK_DOWN) sel = (sel + 1) % (N + 1);
-        else if (f == FLICK_UP) sel = (sel - 1 + N + 1) % (N + 1);
-
-        face_canvas->fillSprite(cfg.color_bg);
-        face_canvas->setTextDatum(middle_left);
-        face_canvas->setTextColor(cfg.color_accent);
-        face_canvas->drawString("SETTINGS", 8, 8);
-        for (int i = 0; i < N; ++i) {
-            int y = 24 + i * 13;
-            bool selected = sel == i;
-            if (selected) face_canvas->fillRoundRect(3, y - 6, 122, 12, 3, cfg.color_primary);
-            face_canvas->setTextColor(selected ? 0x0000 : 0xFFFF);
-            face_canvas->drawString(rows[i].label, 8, y);
-            face_canvas->drawString(*rows[i].value ? "ON" : "OFF", 92, y);
-        }
-        int close_y = 24 + N * 13;
-        bool selected = sel == N;
-        if (selected) face_canvas->fillRoundRect(3, close_y - 6, 122, 12, 3, cfg.color_primary);
-        face_canvas->setTextColor(selected ? 0x0000 : cfg.color_accent);
-        face_canvas->drawString("EXIT", 8, close_y);
-        face_canvas->setTextDatum(bottom_center); face_canvas->setTextColor(0x9CD3);
-        face_canvas->drawString("flick . click", 64, 126);
-        face_canvas->pushSprite(0, 0);
-
-        if (M5.BtnA.wasDoubleClicked()) return;
-        if (M5.BtnA.wasClicked()) {
-            if (sel == N) { save_config(); return; }
-            *rows[sel].value = !*rows[sel].value;
-            save_config();
-            audio_tone(*rows[sel].value ? 760 : 440, 45);
-        }
-        delay(20);
-    }
 }
 
 // Menu items are (label, id). Actions are dispatched by the host in fox_main.
@@ -304,7 +214,6 @@ static const MenuItem MENU[] = {
     {"space weather",      "space"},
     {"aurora tonight?",    "aurora"},
     {"-- settings --",     "nop"},
-    {"settings",           "settings"},
     {"volume",             "volume"},
     {"voice pack",         "voice"},
     {"forget memories",    "forget"},

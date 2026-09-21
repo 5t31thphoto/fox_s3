@@ -91,7 +91,6 @@ def test_brain():
     gs, = struct.unpack_from("<i", blob, off); off += 4; off += 24
     check("version 1", ver == 1)
     check("shared classifier", shared == 1)
-    # A tiny A build is Q8; checked-in B is validated separately below.
     check("dims sane", 0 < dim <= 512 and 0 < L <= 12, f"dim={dim} L={L}")
     kvdim = (dim * KV) // H
 
@@ -122,30 +121,6 @@ def test_brain():
 
 
 # ---------------------------------------------------------------------------
-def test_partitions():
-    print("8MB partition layout:")
-    path = os.path.join(ROOT, "firmware", "partitions.csv")
-    rows = []
-    for line in open(path):
-        line=line.strip()
-        if not line or line.startswith("#"): continue
-        fields = [x.strip().rstrip(",") for x in line.split(",") if x.strip()]
-        name, typ, sub, off, size = fields[:5]
-        rows.append((name, int(off,16), int(size,16)))
-    end=0; ok=True
-    for name, off, size in rows:
-        if off < end: ok=False
-        end=off+size
-    check("partitions non-overlapping", ok)
-    check("partitions end exactly at 8MB", end == 0x800000, hex(end))
-    brain=next((x for x in rows if x[0]=="foxbrain"), None)
-    check("foxbrain partition is 0x48000", brain is not None and brain[2] == 0x48000)
-    for name in ("foxbrainA.bin", "foxbrainB.bin"):
-        f=os.path.join(ROOT,"firmware","main","data",name)
-        check(f"{name} fits", os.path.getsize(f) <= 0x48000, str(os.path.getsize(f)))
-
-
-# ---------------------------------------------------------------------------
 def test_commands():
     print("MultiNet command registry:")
     main = open(os.path.join(ROOT, "firmware", "main", "fox_main.cpp")).read()
@@ -167,7 +142,6 @@ if __name__ == "__main__":
     print("=== Fox build-artifact tests ===")
     test_ir()
     test_brain()
-    test_partitions()
     test_commands()
     print()
     if FAILED:

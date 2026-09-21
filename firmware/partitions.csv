@@ -1,11 +1,14 @@
-# 8MB AtomS3R packed layout. The esp-sr model is ~2.77MB; either offline
-# brain pack is ~294KB. A and B are alternative brain images selected by the
-# flash manifest, not two simultaneously mapped model partitions.
-nvs,         data, nvs,      0x009000,  0x006000,
-otadata,     data, ota,      0x00f000,  0x002000,
-phy_init,    data, phy,      0x011000,  0x001000,
-factory,     app,  factory,  0x020000, 0x4c2000,
-model,       data, spiffs,   0x4e2000, 0x2a3000,
-foxbrain,    data, 0x45,     0x785000, 0x048000,
-foxdata,     data, 0x46,     0x7cd000, 0x02f000,
-foxfs,       data, spiffs,   0x7fc000, 0x004000,
+# 8MB AtomS3R layout. PicoTTS language resources live outside the app so the
+# factory image does not consume their ~1.4MB. Brain B is intentionally compact
+# but remains larger than Brain A. All offsets are fixed and end below 0x800000.
+# Name,       Type, SubType,  Offset,    Size
+nvs,          data, nvs,      0x009000,  0x006000,
+otadata,      data, ota,      0x00f000,  0x002000,
+phy_init,     data, phy,      0x011000,  0x001000,
+factory,      app,  factory,  0x020000,  0x360000,
+model,        data, spiffs,   0x380000,  0x2a0000,
+picotts_ta,   data, undefined,0x620000,  0x0a0000,
+picotts_sg,   data, undefined,0x6c0000,  0x0c0000,
+foxbrain,     data, 0x45,     0x780000,  0x040000,
+foxdata,      data, 0x46,     0x7c0000,  0x32000,
+foxfs,        data, spiffs,   0x7f2000,  0x00004000,

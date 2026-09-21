@@ -26,6 +26,7 @@ static uint16_t hsv565(float h, float s, float v) {
 static bool toy_running(bool& to_menu) {
     M5.update();
     if (wants_menu()) { to_menu = true; g_goto_menu = true; return false; }
+    if (M5.BtnA.wasClicked()) return false;
     return true;
 }
 

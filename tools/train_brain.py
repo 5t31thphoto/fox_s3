@@ -10,8 +10,8 @@ trained on a compact fox-dialogue corpus that maps "[mood] <fact> ->" to a
 short, cute, ON-FACT continuation.
 
 Packs:
-  --pack A   dim=72  hidden=192  L=4  compact int8   ("Chatterbox" brain)
-  --pack B   dim=72  hidden=192  L=6  packed int4   ("Critter" brain)
+  --pack A   dim=64  L=4  ~260KB int8   ("Chatterbox" default brain)
+  --pack B   dim=96  L=6  ~1MB int8     ("Critter" brain)
 
 Even a lightly trained brain is safe: the firmware discards any continuation
 that drops the fact, so the worst case is silence + deterministic templates.
@@ -231,49 +231,23 @@ def quantize_q8(mat, gs):
     return q, s
 
 
-
-def quantize_q4(mat, gs):
-    """Signed int4 weights, two values per byte, fp16 scale per group."""
-    rows, cols = mat.shape
-    assert cols % gs == 0 and gs % 2 == 0
-    q = np.empty((rows, cols // 2), np.uint8)
-    s = np.empty((rows, cols // gs), np.float16)
-    for r in range(rows):
-        row = mat[r]
-        for g in range(0, cols, gs):
-            grp = row[g:g+gs]
-            amax = np.abs(grp).max()
-            scale = amax / 7.0 if amax > 0 else 1.0
-            s[r, g // gs] = np.float16(scale)
-            vals = np.clip(np.round(grp / scale), -8, 7).astype(np.int8)
-            for j in range(0, gs, 2):
-                lo = int(vals[j]) & 0x0F
-                hi = int(vals[j + 1]) & 0x0F
-                q[r, (g + j) // 2] = lo | (hi << 4)
-    return q, s
-
-def write_foxb(path, b, itos, q4=False):
+def write_foxb(path, b, itos):
     P = b.P
     with open(path, "wb") as f:
         f.write(b"FOXB")
         f.write(struct.pack("<I", 1))
         f.write(struct.pack("<iiiiiiii", b.dim, b.hidden, b.L, b.H,
-                            b.n_kv_heads, b.vocab, b.seq_len, 1))
+                            b.n_kv_heads, b.vocab, b.seq_len, 1))  # shared_cls=1
         f.write(struct.pack("<i", b.gs))
-        # reserved[0] is the precision tag: 0 = Q8, 4 = packed Q4.
-        f.write(struct.pack("<6i", 4 if q4 else 0, 0, 0, 0, 0, 0))
+        f.write(struct.pack("<6i", 0, 0, 0, 0, 0, 0))
         f.write(P["emb"].astype("<f4").tobytes())
         f.write(np.stack([P[f"ga{l}"] for l in range(b.L)]).astype("<f4").tobytes())
         f.write(np.stack([P[f"gf{l}"] for l in range(b.L)]).astype("<f4").tobytes())
         f.write(P["g_fin"].astype("<f4").tobytes())
         for nm in ("Wq", "Wk", "Wv", "Wo", "W1", "W2", "W3"):
             for l in range(b.L):
-                if q4:
-                    q, s = quantize_q4(P[f"{nm}{l}"], b.gs)
-                    f.write(q.tobytes()); f.write(s.astype("<f2").tobytes())
-                else:
-                    q, s = quantize_q8(P[f"{nm}{l}"], b.gs)
-                    f.write(q.tobytes()); f.write(s.astype("<f4").tobytes())
+                q, s = quantize_q8(P[f"{nm}{l}"], b.gs)
+                f.write(q.tobytes()); f.write(s.astype("<f4").tobytes())
         for tok in itos:
             f.write(struct.pack("<f", 0.0))
             f.write(struct.pack("<H", len(tok)))
@@ -296,11 +270,14 @@ def main():
     vocab = len(itos)
 
     if args.pack == "A":
-        b = Brain(dim=64, hidden=160, n_layers=4, n_heads=4, vocab=vocab,
-                  seq_len=64, gs=8, seed=args.seed)
+        b = Brain(dim=64, hidden=128, n_layers=4, n_heads=4, vocab=vocab,
+                  seq_len=64, gs=16, seed=args.seed)
     else:
-        b = Brain(dim=72, hidden=192, n_layers=6, n_heads=6, vocab=vocab,
-                  seq_len=72, gs=8, seed=args.seed)
+        # Brain B is wider than A but deliberately compact enough for the 8MB
+        # AtomS3R flash budget after PicoTTS/model/radio assets are installed.
+        # 80-wide x 160 FFN x 3 layers is still ~17% more parameters than A.
+        b = Brain(dim=80, hidden=160, n_layers=3, n_heads=5, vocab=vocab,
+                  seq_len=96, gs=16, seed=args.seed)
 
     nparam = sum(v.size for _, v in b.P.items())
     print(f"train_brain: pack {args.pack}  vocab {vocab}  ~{nparam//1000}K params "
@@ -323,7 +300,7 @@ def main():
                "[excited] found your remote ->", "[grumpy] battery is low ->"]:
         print(f"    {pr:38} => {b.generate(pr, stoi, itos)!r}")
 
-    size = write_foxb(args.out, b, itos, q4=(args.pack == "B"))
+    size = write_foxb(args.out, b, itos)
     print(f"train_brain: wrote {args.out}  {size} bytes")
 
 

@@ -80,8 +80,15 @@ def test_no_orphan_entrypoints():
     dep = read("idf_component.yml")
     check("nimble-cpp dep removed", "h2zero/esp-nimble-cpp" not in dep
           or dep.strip().startswith("#") or "# " in dep.split("esp-nimble-cpp")[0].split("\n")[-1])
-    check("picotts not a versioned registry dep",
-          not re.search(r'^\s*jmattsson/esp-picotts:\s*"\^', dep, re.M))
+    check("picotts is not a hard manifest dependency",
+          "esp-picotts:" not in dep and "jmattsson/picotts:" not in dep)
+    voice = read("fox_voice.cpp")
+    check("local SAM source is present",
+          os.path.exists(os.path.join(MAIN, "fox_sam.c")) and
+          os.path.exists(os.path.join(MAIN, "sam", "sam.c")) and
+          os.path.exists(os.path.join(MAIN, "sam", "reciter.c")) and
+          os.path.exists(os.path.join(MAIN, "sam", "render.c")))
+    check("voice has SAM fallback", "spoke = sam_say(text);" in voice)
 
 
 def test_bayes_kb():
@@ -139,6 +146,30 @@ def test_bayes_kb():
           f"{correct}/{len(ent)}")
 
 
+def test_flash_layout():
+    print("8MB flash layout:")
+    import csv
+    import os
+    root = os.path.dirname(os.path.dirname(__file__))
+    path = os.path.join(root, "firmware", "partitions.csv")
+    rows = []
+    with open(path, newline="") as f:
+        for row in csv.reader(f):
+            row = [c.strip() for c in row if c.strip()]
+            if row and not row[0].startswith("#"):
+                rows.append((row[0], int(row[3], 16), int(row[4], 16)))
+    rows.sort(key=lambda x: x[1])
+    for a, b in zip(rows, rows[1:]):
+        check(f"no overlap {a[0]} -> {b[0]}", a[1] + a[2] <= b[1])
+    check("flash end <= 8MB", rows[-1][1] + rows[-1][2] <= 0x800000)
+    p = {name: (off, size) for name, off, size in rows}
+    check("factory is large enough for external-resource app", p["factory"][1] >= 0x360000)
+    check("Pico TA partition", p["picotts_ta"][1] >= 0x0A0000)
+    check("Pico SG partition", p["picotts_sg"][1] >= 0x0C0000)
+    check("brain partition", p["foxbrain"][1] >= 0x40000)
+    check("IR partition", p["foxdata"][1] >= 196857)
+    check("journal partition", p["foxfs"][1] >= 0x4000)
+
 if __name__ == "__main__":
     print("=== Fox app-wiring tests ===")
     test_command_ids_unique()
@@ -146,7 +177,9 @@ if __name__ == "__main__":
     test_tools_have_runners()
     test_no_orphan_entrypoints()
     test_bayes_kb()
+    test_flash_layout()
     print()
     if FAILED:
         print(f"FAILED: {len(FAILED)}: {FAILED}"); sys.exit(1)
     print("All wiring checks passed.")
+

@@ -3,7 +3,7 @@
 // These are the "digital fidget toy" instruments: a BLE radar you sweep around
 // the room by rotating the device, a WiFi scanner, and passive sniffers. Each
 // is both:
-//   * a standalone menu app (flick to navigate, double-click to exit), and
+//   * a standalone menu app (flick to navigate, click to exit), and
 //   * an LLM-callable tool that returns a short text report the fox can speak.
 //
 // Everything is drawn on the 128x128 LCD via the shared face canvas.
@@ -13,264 +13,257 @@
 #include <BLEDevice.h>
 #include <BLEScan.h>
 #include <BLEAdvertisedDevice.h>
+#include <esp_heap_caps.h>
 
 // forward decls from other units
 extern M5Canvas* face_canvas;
 extern FoxConfig cfg;
+static BLEScan* ble_scan = nullptr;
+
+static void tool_radio_release() {
+    // Return the shared radio hardware to a neutral state after every RF app.
+    WiFi.scanDelete();
+    esp_wifi_set_promiscuous(false);
+    WiFi.mode(WIFI_OFF);
+    if (ble_scan) ble_scan->stop();
+}
 
 // ---------------------------------------------------------------------------
-//  Rotational RF radar
+//  Rotational RSSI radar
 //
-// This is deliberately NOT a compass. The fox is held level and rotated
-// through a sweep. The green needle is the angle actually measured from the
-// IMU gyro; the red needle is a slowly advancing target that tells the user
-// where/how fast to rotate. Radio scans continue throughout the sweep.
-//
-// Each source gets an RSSI profile indexed by rotational angle. The strongest
-// part of that profile supplies its relative direction; the overall RSSI
-// supplies only a relative radial placement. No absolute bearing or metres
-// are claimed.
+// This is deliberately NOT a compass. The user holds Fox level and rotates
+// through one guided sweep. The green needle is the measured IMU rotation;
+// the red needle is the target measurement position. RF scans run while the
+// sweep advances. Each source accumulates an RSSI profile against rotation
+// angle. After the sweep, angular position comes from that profile and radial
+// position is only a relative RSSI heuristic.
 // ---------------------------------------------------------------------------
-static const int RADAR_BINS = 72; // 5 degree bins
-static const int MAX_BLIPS = 24;
-static const float RADAR_SWEEP_DEG = 360.0f;
-static const float RADAR_TARGET_DPS = 18.0f;
-
+static constexpr int RADAR_SOURCES = 24;
+static constexpr int RADAR_BINS = 72;
 struct RadarSource {
-    String name;
-    float rssi_sum[RADAR_BINS];
-    uint16_t hits[RADAR_BINS];
-    float angle;
-    float rssi;
-    float confidence;
+    char id[18];
+    char name[24];
+    int8_t rssi[RADAR_BINS];
+    uint8_t hits[RADAR_BINS];
+    int strongest;
     uint32_t seen;
 };
+static RadarSource* radar_sources = nullptr;
+static int radar_n = 0;
 
-static RadarSource blips[MAX_BLIPS];
-static int blip_n = 0;
-static BLEScan* ble_scan = nullptr;
-static bool radar_active = false;
-static float radar_angle = 0.0f;       // unwrapped, relative rotation
-static float radar_target = 0.0f;      // red needle, 0..360
-static uint32_t radar_last_ms = 0;
-static uint32_t radar_start_ms = 0;
-static float radar_total_motion = 0.0f;
-static bool radar_complete = false;
-
-static float wrap360(float a) {
-    while (a < 0) a += 360.0f;
-    while (a >= 360.0f) a -= 360.0f;
-    return a;
+static void radar_alloc() {
+    if (radar_sources) return;
+    radar_sources = (RadarSource*)heap_caps_calloc(RADAR_SOURCES, sizeof(RadarSource),
+                                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!radar_sources) return;
+    for (int i = 0; i < RADAR_SOURCES; ++i)
+        for (int b = 0; b < RADAR_BINS; ++b) radar_sources[i].rssi[b] = -127;
 }
 
 static void radar_reset() {
-    blip_n = 0;
-    memset(blips, 0, sizeof(blips));
-    radar_angle = 0.0f;
-    radar_target = 0.0f;
-    radar_total_motion = 0.0f;
-    radar_last_ms = millis();
-    radar_start_ms = radar_last_ms;
-    radar_complete = false;
-    radar_active = true;
+    radar_alloc();
+    radar_n = 0;
+    if (!radar_sources) return;
+    memset(radar_sources, 0, RADAR_SOURCES * sizeof(RadarSource));
+    for (int i = 0; i < RADAR_SOURCES; ++i)
+        for (int b = 0; b < RADAR_BINS; ++b) radar_sources[i].rssi[b] = -127;
 }
 
-static float radar_update_rotation() {
-    uint32_t now = millis();
-    float dt = (now - radar_last_ms) * 0.001f;
-    radar_last_ms = now;
-    if (dt <= 0 || dt > 0.25f) return wrap360(radar_angle);
+static int radar_find(const char* id) {
+    for (int i = 0; i < radar_n; ++i)
+        if (!strcmp(radar_sources[i].id, id)) return i;
+    return -1;
+}
 
+static int radar_source(const char* id, const String& name) {
+    int i = radar_find(id);
+    if (i >= 0) return i;
+    if (radar_n >= RADAR_SOURCES) return -1;
+    i = radar_n++;
+    strncpy(radar_sources[i].id, id, sizeof(radar_sources[i].id)-1);
+    strncpy(radar_sources[i].name, name.c_str(), sizeof(radar_sources[i].name)-1);
+    radar_sources[i].strongest = -127;
+    return i;
+}
+
+static void radar_sample(const char* id, const String& name, int rssi, float angle_deg) {
+    if (!radar_sources) radar_alloc();
+    if (!radar_sources) return;
+    int i = radar_source(id, name);
+    if (i < 0) return;
+    float a = fmodf(angle_deg, 360.0f); if (a < 0) a += 360.0f;
+    int b = (int)(a * RADAR_BINS / 360.0f) % RADAR_BINS;
+    RadarSource& d = radar_sources[i];
+    if (d.hits[b] == 0) d.rssi[b] = (int8_t)constrain(rssi, -127, 0);
+    else d.rssi[b] = (int8_t)((d.rssi[b] * 3 + constrain(rssi, -127, 0)) / 4);
+    if (d.hits[b] < 255) d.hits[b]++;
+    if (rssi > d.strongest) d.strongest = rssi;
+    d.seen = millis();
+}
+
+static float radar_peak_angle(const RadarSource& d) {
+    // Circular weighted centroid around the strongest RSSI response. Use only
+    // samples within 12 dB of the source peak so unrelated weak observations
+    // don't drag the apparent direction around the circle.
+    int peak = d.strongest;
+    float sx = 0, sy = 0, wsum = 0;
+    for (int b = 0; b < RADAR_BINS; ++b) {
+        if (!d.hits[b]) continue;
+        int db = peak - d.rssi[b];
+        if (db > 12) continue;
+        float w = (float)(13 - db) * d.hits[b];
+        float a = (b + 0.5f) * 2.0f * PI / RADAR_BINS;
+        sx += cosf(a) * w; sy += sinf(a) * w; wsum += w;
+    }
+    if (wsum < 1) return 0;
+    float a = atan2f(sy, sx) * 180.0f / PI;
+    if (a < 0) a += 360.0f;
+    return a;
+}
+
+static float radar_confidence(const RadarSource& d) {
+    int hits = 0;
+    for (int b = 0; b < RADAR_BINS; ++b) if (d.hits[b]) hits += d.hits[b];
+    return constrain(hits / 20.0f, 0.0f, 1.0f);
+}
+
+static float radar_range(const RadarSource& d) {
+    // Relative only. Strong signals appear closer; no metres are claimed.
+    float x = constrain((float)(d.strongest + 90), 5.0f, 60.0f) / 60.0f;
+    return 0.12f + (1.0f - x) * 0.78f;
+}
+
+static float radar_gyro_angle(float& angle_deg, uint32_t& last_ms) {
     float gx, gy, gz;
-    if (M5.Imu.getGyro(&gx, &gy, &gz)) {
-        // Device is held level during the sweep, so the Z gyro is the
-        // rotation axis. Keep the sign: the red needle advances in the same
-        // direction the operator is expected to rotate.
-        float d = gz * dt;
-        radar_angle += d;
-        radar_total_motion += fabsf(d);
-    }
-    float elapsed = (now - radar_start_ms) * 0.001f;
-    radar_target = fmodf(elapsed * RADAR_TARGET_DPS, RADAR_SWEEP_DEG);
-    if (radar_total_motion >= 330.0f && elapsed >= 14.0f) radar_complete = true;
-    return wrap360(radar_angle);
+    uint32_t now = millis();
+    float dt = last_ms ? (now - last_ms) * 0.001f : 0.0f;
+    last_ms = now;
+    if (!M5.Imu.getGyro(&gx, &gy, &gz)) return angle_deg;
+    // Held level, yaw is the Z gyro axis. Integrate the signed rotation and
+    // keep the display angle wrapped to one turn.
+    angle_deg += gz * dt;
+    while (angle_deg < 0) angle_deg += 360.0f;
+    while (angle_deg >= 360.0f) angle_deg -= 360.0f;
+    return angle_deg;
 }
 
-static int radar_bin(float angle) {
-    int b = (int)floorf(wrap360(angle) / (360.0f / RADAR_BINS));
-    return constrain(b, 0, RADAR_BINS - 1);
-}
-
-static void radar_record(const String& name, int rssi, float angle) {
-    if (!name.length()) return;
-    int idx = -1;
-    for (int i = 0; i < blip_n; ++i) {
-        if (blips[i].name == name) { idx = i; break; }
-    }
-    if (idx < 0) {
-        if (blip_n >= MAX_BLIPS) return;
-        idx = blip_n++;
-        blips[idx].name = name;
-        for (int b = 0; b < RADAR_BINS; ++b) {
-            blips[idx].rssi_sum[b] = 0;
-            blips[idx].hits[b] = 0;
-        }
-    }
-    int b = radar_bin(angle);
-    blips[idx].rssi_sum[b] += (float)rssi;
-    blips[idx].hits[b]++;
-    blips[idx].seen = millis();
-}
-
-static void radar_finalize_sources() {
-    for (int i = 0; i < blip_n; ++i) {
-        int best = 0; float best_r = -127.0f; int total = 0;
-        for (int b = 0; b < RADAR_BINS; ++b) {
-            if (!blips[i].hits[b]) continue;
-            float r = blips[i].rssi_sum[b] / blips[i].hits[b];
-            total += blips[i].hits[b];
-            if (r > best_r) { best_r = r; best = b; }
-        }
-        blips[i].angle = (best + 0.5f) * (360.0f / RADAR_BINS);
-        blips[i].rssi = best_r;
-
-        // Confidence combines sample count with how much the peak stands out
-        // from the source's own angular baseline.
-        float base = 0.0f; int nb = 0;
-        for (int b = 0; b < RADAR_BINS; ++b) if (blips[i].hits[b]) {
-            base += blips[i].rssi_sum[b] / blips[i].hits[b]; nb++;
-        }
-        if (nb) base /= nb; else base = best_r;
-        float peak = max(0.0f, best_r - base);
-        float sample_c = constrain(total / 20.0f, 0.0f, 1.0f);
-        blips[i].confidence = constrain(0.15f + peak / 25.0f, 0.0f, 1.0f) * sample_c;
-    }
-}
-
-static void draw_tiny_fox(int cx, int cy) {
-    uint16_t fur = cfg.color_primary, acc = cfg.color_accent;
-    face_canvas->fillTriangle(cx - 5, cy - 4, cx - 8, cy - 11, cx - 1, cy - 7, fur);
-    face_canvas->fillTriangle(cx + 5, cy - 4, cx + 8, cy - 11, cx + 1, cy - 7, fur);
-    face_canvas->fillCircle(cx, cy, 6, fur);
-    face_canvas->fillCircle(cx - 2, cy - 1, 1, 0x0000);
-    face_canvas->fillCircle(cx + 2, cy - 1, 1, 0x0000);
-    face_canvas->fillCircle(cx, cy + 2, 1, acc);
-}
-
-static void radar_draw(float actual_angle, int count, bool wifi, bool scanning) {
+static void radar_draw(float green_angle, float red_angle, bool wifi, bool finished) {
     uint16_t bg = cfg.color_bg, fur = cfg.color_primary, acc = cfg.color_accent;
     face_canvas->fillSprite(bg);
     const int cx = 64, cy = 64, R = 48;
-    for (int r = R; r > 0; r -= 16) face_canvas->drawCircle(cx, cy, r, 0x2145);
-    face_canvas->drawLine(cx - R, cy, cx + R, cy, 0x2145);
-    face_canvas->drawLine(cx, cy - R, cx, cy + R, 0x2145);
+    for (int r = 16; r <= R; r += 16) face_canvas->drawCircle(cx, cy, r, 0x2145);
+    // Fox in the center: deliberately tiny so the map reads as "around Fox".
+    face_canvas->fillTriangle(cx-5,cy-2,cx-2,cy-9,cx+1,cy-3,fur);
+    face_canvas->fillTriangle(cx+5,cy-2,cx+2,cy-9,cx-1,cy-3,fur);
+    face_canvas->fillEllipse(cx,cy+2,5,4,fur);
+    face_canvas->fillCircle(cx-2,cy+1,1,0x0000); face_canvas->fillCircle(cx+2,cy+1,1,0x0000);
 
-    float ga = (actual_angle - 90.0f) * PI / 180.0f;
-    float ra = (radar_target - 90.0f) * PI / 180.0f;
-    if (scanning) {
-        face_canvas->drawLine(cx, cy, cx + R * cosf(ra), cy + R * sinf(ra), 0xF800); // red target
-        face_canvas->drawLine(cx, cy, cx + R * cosf(ga), cy + R * sinf(ga), 0x07E0); // green actual
+    float ga = (green_angle - 90) * PI / 180.0f;
+    float ra = (red_angle - 90) * PI / 180.0f;
+    face_canvas->drawLine(cx, cy, cx + (int)(R*cosf(ga)), cy + (int)(R*sinf(ga)), 0x07E0);
+    face_canvas->drawLine(cx, cy, cx + (int)(R*cosf(ra)), cy + (int)(R*sinf(ra)), 0xF800);
+
+    for (int i = 0; i < radar_n; ++i) {
+        RadarSource& d = radar_sources[i];
+        float a = (radar_peak_angle(d) - 90) * PI / 180.0f;
+        float rr = R * radar_range(d);
+        int x = cx + (int)(rr*cosf(a)), y = cy + (int)(rr*sinf(a));
+        face_canvas->fillCircle(x, y, 3, d.seen && millis()-d.seen < 3000 ? fur : 0x8410);
     }
-
-    if (!scanning) {
-        radar_finalize_sources();
-        for (int i = 0; i < blip_n; ++i) {
-            float br = (blips[i].angle - 90.0f) * PI / 180.0f;
-            // Relative radial heuristic only: stronger RSSI is nearer to Fox.
-            float rr = R - constrain((blips[i].rssi + 90.0f) * 0.70f, 0.0f, (float)(R - 7));
-            int x = cx + (int)(rr * cosf(br));
-            int y = cy + (int)(rr * sinf(br));
-            uint16_t col = blips[i].confidence > 0.45f ? fur : 0x8410;
-            face_canvas->fillCircle(x, y, 3, col);
-        }
-    }
-    draw_tiny_fox(cx, cy);
-
-    face_canvas->setTextColor(acc); face_canvas->setTextDatum(top_left);
-    face_canvas->drawString(wifi ? "WIFI RADAR" : "BLE RADAR", 3, 2);
-    face_canvas->setTextDatum(top_right);
-    face_canvas->drawString(String(count), 125, 2);
-    face_canvas->setTextDatum(bottom_center);
-    face_canvas->setTextColor(0x9CD3);
-    if (scanning) face_canvas->drawString("green follows red", 64, 125);
-    else face_canvas->drawString("click=rescan  double=exit", 64, 125);
+    face_canvas->setTextDatum(top_left); face_canvas->setTextColor(acc);
+    face_canvas->drawString(wifi ? "WIFI RADAR" : "BLE RADAR", 2, 2);
+    face_canvas->setTextDatum(top_right); face_canvas->setTextColor(0x07E0);
+    face_canvas->drawString(finished ? "DONE" : "ROTATE", 126, 2);
+    face_canvas->setTextDatum(bottom_center); face_canvas->setTextColor(0x9CD3);
+    face_canvas->drawString(finished ? "click = rescan" : "green -> red", 64, 124);
     face_canvas->pushSprite(0, 0);
 }
 
-static void radar_prompt(bool wifi) {
+static void radar_draw_prompt(bool wifi, float progress) {
     face_canvas->fillSprite(cfg.color_bg);
     face_canvas->setTextDatum(middle_center);
     face_canvas->setTextColor(cfg.color_accent);
-    face_canvas->drawString(wifi ? "WIFI RADAR" : "BLE RADAR", 64, 22);
+    face_canvas->drawString(wifi ? "WIFI RADAR" : "BLE RADAR", 64, 18);
     face_canvas->setTextColor(0xFFFF);
-    face_canvas->drawString("hold level + steady", 64, 47);
-    face_canvas->drawString("rotate 360°", 64, 63);
-    face_canvas->setTextColor(0x07E0); face_canvas->drawString("green = you", 64, 80);
-    face_canvas->setTextColor(0xF800); face_canvas->drawString("red = target", 64, 94);
-    face_canvas->setTextColor(0x9CD3); face_canvas->drawString("follow red with green", 64, 111);
-    face_canvas->pushSprite(0, 0);
-    delay(900);
+    face_canvas->drawString("keep me level", 64, 43);
+    face_canvas->drawString("follow the red", 64, 58);
+    face_canvas->drawString("with the green", 64, 72);
+    face_canvas->drawString("rotate 360 deg", 64, 87);
+    face_canvas->drawRect(18, 103, 92, 7, 0x2145);
+    face_canvas->fillRect(20, 105, (int)(88*constrain(progress,0.f,1.f)), 3, 0x07E0);
+    face_canvas->pushSprite(0,0);
 }
 
-static bool radar_should_exit() {
-    M5.update();
-    return M5.BtnA.wasDoubleClicked();
-}
-
-// ---------------------------------------------------------------------------
-// BLE RADAR
-// ---------------------------------------------------------------------------
-static void ble_begin_once() {
-    static bool inited = false;
-    if (inited && ble_scan) return;
-    BLEDevice::init("");
-    ble_scan = BLEDevice::getScan();
-    ble_scan->setActiveScan(true);
-    ble_scan->setInterval(80);
-    ble_scan->setWindow(60);
-    inited = true;
-}
-
-void tool_menu_ble_radar() {
-    WiFi.mode(WIFI_OFF);
-    delay(50);
+static void radar_scan_ble(float angle) {
     ble_begin_once();
-    for (;;) {
-        radar_prompt(false);
-        radar_reset();
-        speak("follow my red needle. spin me around~");
-        while (!radar_complete && millis() - radar_start_ms < 45000) {
-            if (radar_should_exit()) { tool_radio_release(); return; }
-            float actual = radar_update_rotation();
-            BLEScanResults* res = ble_scan->start(1, false);
-            int n = res ? res->getCount() : 0;
-            for (int i = 0; i < n; ++i) {
-                BLEAdvertisedDevice d = res->getDevice(i);
-                String nm = d.haveName() ? String(d.getName().c_str())
-                                         : String(d.getAddress().toString().c_str()).substring(0, 8);
-                radar_record(nm, d.getRSSI(), actual);
-            }
-            ble_scan->clearResults();
-            radar_draw(actual, blip_n, false, true);
-        }
-        radar_complete = true;
-        radar_finalize_sources();
-        radar_draw(wrap360(radar_angle), blip_n, false, false);
-
-        // The finished map stays up. Single click means "measure again";
-        // double-click is the only exit gesture.
-        while (true) {
-            M5.update();
-            if (M5.BtnA.wasDoubleClicked()) { tool_radio_release(); return; }
-            if (M5.BtnA.wasClicked()) break;
-            radar_target = fmodf((millis() - radar_start_ms) * 24.0f / 1000.0f, 360.0f);
-            radar_draw(wrap360(radar_angle), blip_n, false, true);
-            delay(25);
-        }
+    if (!ble_scan) return;
+    BLEScanResults* res = ble_scan->start(1, false);
+    if (!res) return;
+    for (int i = 0; i < res->getCount(); ++i) {
+        BLEAdvertisedDevice d = res->getDevice(i);
+        String id = String(d.getAddress().toString().c_str());
+        String nm = d.haveName() ? String(d.getName().c_str()) : id.substring(0, 8);
+        radar_sample(id.c_str(), nm, d.getRSSI(), angle);
     }
+    ble_scan->clearResults();
 }
 
-// LLM-callable: quick BLE sweep — not the directional radar.
+static void radar_scan_wifi(float angle) {
+    int n = WiFi.scanNetworks(false, true, true, 180);
+    if (n < 0) return;
+    for (int i = 0; i < n; ++i) {
+        String id = WiFi.BSSIDstr(i);
+        radar_sample(id.c_str(), WiFi.SSID(i), WiFi.RSSI(i), angle);
+    }
+    WiFi.scanDelete();
+}
+
+static void radar_run(bool wifi) {
+  for (;;) {
+    radar_reset();
+    if (wifi) {
+        WiFi.mode(WIFI_STA); WiFi.disconnect(false, false); delay(50);
+    } else {
+        WiFi.mode(WIFI_OFF); delay(50); ble_begin_once();
+    }
+
+    speak("keep me level, then follow the red needle with the green one~");
+    float green = 0, red = 0;
+    uint32_t last = millis(), start = last, last_scan = 0;
+    bool sweep = true;
+    while (sweep) {
+        M5.update();
+        if (M5.BtnA.wasDoubleClicked()) break;
+        uint32_t now = millis();
+        float dt = (now-last) * 0.001f; last = now;
+        float gx,gy,gz;
+        if (M5.Imu.getGyro(&gx,&gy,&gz)) green = fmodf(green + gz*dt + 360.0f, 360.0f);
+        red = fmodf((now-start) * 12.0f, 360.0f); // 30 sec per guided turn
+        float err = fabsf(green-red); if (err > 180) err = 360-err;
+        if (now-last_scan > 450) {
+            last_scan = now;
+            if (wifi) radar_scan_wifi(green); else radar_scan_ble(green);
+        }
+        radar_draw_prompt(wifi, (red / 360.0f));
+        if (red > 355.0f && err < 28.0f) sweep = false;
+        if (now-start > 45000) sweep = false;
+        delay(8);
+    }
+    radar_draw(green, red, wifi, true);
+    speak(String("i mapped ") + radar_n + " signals around me~");
+    while (true) {
+        M5.update();
+        if (M5.BtnA.wasDoubleClicked()) { tool_radio_release(); return; }
+        if (M5.BtnA.wasClicked()) { break; }
+        radar_draw(green, red, wifi, true);
+        delay(80);
+    }
+    tool_radio_release();
+  }
+}
+
+void tool_menu_ble_radar() { radar_run(false); }
+
 const char* tool_ble_scan_report() {
     static char buf[220];
     ble_begin_once();
@@ -278,52 +271,17 @@ const char* tool_ble_scan_report() {
     int n = res ? res->getCount() : 0, strongest = -999; String who = "";
     for (int i = 0; i < n; ++i) {
         BLEAdvertisedDevice d = res->getDevice(i);
-        if (d.getRSSI() > strongest) {
-            strongest = d.getRSSI();
-            who = d.haveName() ? String(d.getName().c_str())
-                               : String(d.getAddress().toString().c_str());
-        }
+        if (d.getRSSI() > strongest) { strongest=d.getRSSI(); who=d.haveName()?String(d.getName().c_str()):String(d.getAddress().toString().c_str()); }
     }
     ble_scan->clearResults();
-    snprintf(buf, sizeof(buf),
-             "{\"ble_devices\":%d,\"closest\":\"%s\",\"rssi\":%d}",
-             n, who.c_str(), strongest);
+    snprintf(buf,sizeof(buf),"{\"ble_devices\":%d,\"closest\":\"%s\",\"rssi\":%d}",n,who.c_str(),strongest);
     return buf;
 }
 
-// ---------------------------------------------------------------------------
-// WIFI RADAR
-// ---------------------------------------------------------------------------
-void tool_menu_wifi_radar() {
-    WiFi.mode(WIFI_STA);
-    WiFi.setSleep(false);
-    delay(50);
-    for (;;) {
-        radar_prompt(true);
-        radar_reset();
-        speak("follow my red needle. spin me around~");
-        while (!radar_complete && millis() - radar_start_ms < 45000) {
-            if (radar_should_exit()) { tool_radio_release(); return; }
-            float actual = radar_update_rotation();
-            int n = WiFi.scanNetworks(false, true, true, 180);
-            for (int i = 0; i < n; ++i)
-                radar_record(WiFi.SSID(i), WiFi.RSSI(i), actual);
-            WiFi.scanDelete();
-            radar_draw(actual, blip_n, true, true);
-        }
-        radar_complete = true;
-        radar_finalize_sources();
-        radar_draw(wrap360(radar_angle), blip_n, true, false);
-        while (true) {
-            M5.update();
-            if (M5.BtnA.wasDoubleClicked()) { tool_radio_release(); return; }
-            if (M5.BtnA.wasClicked()) break;
-            radar_target = fmodf((millis() - radar_start_ms) * 24.0f / 1000.0f, 360.0f);
-            radar_draw(wrap360(radar_angle), blip_n, true, true);
-            delay(25);
-        }
-    }
-}
+// ===========================================================================
+//  WIFI SCAN / RADAR
+// ===========================================================================
+void tool_menu_wifi_radar() { radar_run(true); }
 
 const char* tool_wifi_scan_report() {
     static char buf[220];
@@ -337,19 +295,6 @@ const char* tool_wifi_scan_report() {
              "{\"wifi_aps\":%d,\"strongest\":\"%s\",\"rssi\":%d}",
              n, who.c_str(), best);
     return buf;
-}
-
-// Release every radio resource owned by the tool layer. Never erase saved
-// WiFi credentials: disconnect(false,false) is intentionally avoided here.
-void tool_radio_release() {
-    WiFi.scanDelete();
-    esp_wifi_set_promiscuous(false);
-    WiFi.mode(WIFI_OFF);
-    if (ble_scan) {
-        ble_scan->clearResults();
-        BLEDevice::deinit(true);
-        ble_scan = nullptr;
-    }
 }
 
 // ===========================================================================
@@ -438,7 +383,7 @@ void tool_menu_sniffer() {
     uint32_t last = 0;
     while (true) {
         M5.update();
-        if (M5.BtnA.wasDoubleClicked()) break;
+        if (M5.BtnA.wasClicked() || M5.BtnA.wasDoubleClicked()) break;
         if (millis() - last > 250) {   // hop channels ~4/sec
             ch = (ch % 13) + 1;
             esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
@@ -460,11 +405,11 @@ void tool_menu_sniffer() {
         face_canvas->setTextColor(0xFFFF); face_canvas->setTextDatum(bottom_left);
         face_canvas->drawString("score " + String(pwn_score), 4, 122);
         face_canvas->setTextColor(0x9CD3); face_canvas->setTextDatum(bottom_right);
-        face_canvas->drawString("double=exit", 124, 122);
+        face_canvas->drawString("click=exit", 124, 122);
         face_canvas->pushSprite(0, 0);
         delay(40);
     }
-    tool_radio_release();
+    esp_wifi_set_promiscuous(false);
     // report — and forget: nothing is written to flash.
     speak(String("i heard ") + pwn_eapol + " handshakes and " +
           pwn_open_beacons + " open nets. all in my head, nothing saved~");
@@ -506,7 +451,7 @@ void tool_menu_probe_sniff() {
     int ch = 1; uint32_t last = 0;
     while (true) {
         M5.update();
-        if (M5.BtnA.wasDoubleClicked()) break;
+        if (M5.BtnA.wasClicked() || M5.BtnA.wasDoubleClicked()) break;
         if (millis() - last > 300) { ch = (ch % 13) + 1; esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE); last = millis(); }
         face_canvas->fillSprite(cfg.color_bg);
         face_canvas->setTextColor(cfg.color_accent); face_canvas->setTextDatum(top_left);
@@ -519,6 +464,6 @@ void tool_menu_probe_sniff() {
         face_canvas->pushSprite(0, 0);
         delay(40);
     }
-    tool_radio_release();
+    esp_wifi_set_promiscuous(false);
     speak(String("saw ") + probe_count + " different network names being sought");
 }

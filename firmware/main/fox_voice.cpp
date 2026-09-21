@@ -75,21 +75,32 @@ static bool pico_say(const String& text) {
     if (!g_echo_ok) return false;
     audio_set_volume(g_cfg.volume > 100 ? 100 : g_cfg.volume);
     s_tts_done = false;
-    if (!picotts_init(5, pico_cb, 1)) return false;
+    if (!picotts_init(5, pico_cb, 1)) {
+        Serial.println("FOX: PicoTTS init failed; using SAM fallback");
+        return false;
+    }
     picotts_set_idle_notify(pico_idle);
     picotts_set_error_notify(pico_err);
     picotts_add(text.c_str(), text.length() + 1);
     uint32_t guard = millis();
     while (!s_tts_done && millis() - guard < 12000) { M5.update(); delay(4); }
     picotts_shutdown();
+    if (!s_tts_done) {
+        Serial.println("FOX: PicoTTS timeout; using SAM fallback");
+        return false;
+    }
     return true;
 }
 #endif
 
 // ---- SAM path ---------------------------------------------------------------
 static bool sam_say(const String& text) {
+    // SAM "Little Robot" tuning: deliberately warm/robotic rather than the
+    // default C64 settings. These are the established SAM voice parameters
+    // used for a small robot character: speed 92, pitch 60, throat 190,
+    // mouth 190. The synth itself remains the real SAM/ESP8266SAM engine.
     uint8_t* pcm = nullptr; int len = 0;
-    if (!sam_render(text.c_str(), 72, 96, 110, 160, &pcm, &len) || !pcm)
+    if (!sam_render(text.c_str(), 92, 60, 190, 190, &pcm, &len) || !pcm)
         return false;
     if (!g_echo_ok) { sam_free(pcm); return false; }
     audio_set_volume(g_cfg.volume > 100 ? 100 : g_cfg.volume);

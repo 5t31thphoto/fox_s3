@@ -1,3 +1,10 @@
+# Use the project's 8MB custom partition table. Without these settings,
+# ESP-IDF silently falls back to its default 1MB factory partition, which
+# cannot contain fox.bin (~3MB).
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
+
 # PicoTTS is kept out of fox.bin. Its English-US TA/SG resources are flashed
 # into the dedicated picotts_ta/picotts_sg partitions by the component build.
 # If PicoTTS cannot be acquired in CI, the local SAM voice remains available.
@@ -7,18 +14,6 @@ CONFIG_PICOTTS_TA_PARTITION="picotts_ta"
 CONFIG_PICOTTS_SG_PARTITION="picotts_sg"
 
 CONFIG_FREERTOS_HZ=1000
-
-# Arduino NetworkClientSecure / ssl_client.cpp has a deliberate compile-time
-# guard: it emits the TLS implementation only when at least one legacy
-# mbedTLS PSK key-exchange option is enabled. NetworkClientSecure.cpp is still
-# compiled without these options, which otherwise produces linker failures for
-# start_ssl_client(), ssl_init(), send_ssl_data(), etc.
-# Enable the minimal PSK configuration required to make Arduino's TLS wrapper
-# compile/link under ESP-IDF 5.5.2. This does NOT make Fox use PSK for ordinary
-# HTTPS; certificate-based TLS remains selected by NetworkClientSecure.
-CONFIG_MBEDTLS_TLS_ENABLED=y
-CONFIG_MBEDTLS_PSK_MODES=y
-CONFIG_MBEDTLS_KEY_EXCHANGE_PSK=y
 
 # BLE scanning: Arduino-ESP32 BLE API is backed by NimBLE in this IDF app.
 # Keep Bluetooth enabled as BLE-only; Fox uses observer/scanner functionality.

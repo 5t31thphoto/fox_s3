@@ -29,10 +29,6 @@ dependencies:
   # Offline speech recognition (MultiNet7 + AFE).
   espressif/esp-sr: "^2.0.0"
   # Arduino core as an IDF component (provides WiFi/BLE/HTTPClient/Preferences).
-  # IDF 5.5.2 must use the Arduino 3.3.7 release built against the same
-  # IDF branch. Do not use ^3.0.0 here: that allows newer Arduino releases
-  # built against later IDF 5.5.x revisions and can expose NimBLE APIs that
-  # are absent from the ESP-IDF 5.5.2 host stack.
-  espressif/arduino-esp32: "=3.3.7"
+  espressif/arduino-esp32: "^3.0.0"
   # JSON for cloud chat/transcription payloads and USB config parsing.
   bblanchon/arduinojson: "^7.0.0"

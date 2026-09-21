@@ -7,3 +7,18 @@ CONFIG_PICOTTS_TA_PARTITION="picotts_ta"
 CONFIG_PICOTTS_SG_PARTITION="picotts_sg"
 
 CONFIG_FREERTOS_HZ=1000
+
+# BLE scanning: Arduino-ESP32 BLE API is backed by NimBLE in this IDF app.
+# Keep Bluetooth enabled as BLE-only; Fox uses observer/scanner functionality.
+CONFIG_BT_ENABLED=y
+CONFIG_BT_BLUEDROID_ENABLED=n
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BT_CONTROLLER_ENABLED=y
+CONFIG_BT_CONTROLLER_ONLY=n
+CONFIG_BT_NIMBLE_ROLE_OBSERVER=y
+
+# Arduino-ESP32 3.x BLE headers still test these compatibility Kconfig names.
+# ESP-IDF 5.5 maps them to the BT_* symbols above.
+CONFIG_NIMBLE_ENABLED=y
+CONFIG_NIMBLE_ROLE_OBSERVER=y
+CONFIG_BLUEDROID_ENABLED=n

@@ -19,13 +19,32 @@
 extern M5Canvas* face_canvas;
 extern FoxConfig cfg;
 static BLEScan* ble_scan = nullptr;
+static bool ble_initialized = false;
+
+// Arduino-ESP32 3.x exposes the BLE C++ API when the IDF NimBLE host is enabled.
+// Keep the host initialized for the life of Fox; repeatedly deinitializing/reinitializing
+// BLE is both expensive and has known reinitialization problems. Radio *scans* are
+// still stopped and their result cache is released whenever a tool exits.
+static void ble_begin_once() {
+    if (ble_initialized && ble_scan) return;
+    if (!BLEDevice::init("")) return;
+    ble_scan = BLEDevice::getScan();
+    if (!ble_scan) return;
+    ble_scan->setActiveScan(true);
+    ble_scan->setInterval(100);
+    ble_scan->setWindow(90);
+    ble_initialized = true;
+}
 
 static void tool_radio_release() {
     // Return the shared radio hardware to a neutral state after every RF app.
     WiFi.scanDelete();
     esp_wifi_set_promiscuous(false);
     WiFi.mode(WIFI_OFF);
-    if (ble_scan) ble_scan->stop();
+    if (ble_scan) {
+        ble_scan->stop();
+        ble_scan->clearResults();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -267,6 +286,7 @@ void tool_menu_ble_radar() { radar_run(false); }
 const char* tool_ble_scan_report() {
     static char buf[220];
     ble_begin_once();
+    if (!ble_scan) return "{\"ble_devices\":0,\"closest\":\"\",\"rssi\":-999}";
     BLEScanResults* res = ble_scan->start(3, false);
     int n = res ? res->getCount() : 0, strongest = -999; String who = "";
     for (int i = 0; i < n; ++i) {

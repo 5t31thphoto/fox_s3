@@ -35,7 +35,7 @@ idf_component_register(
         "echobase/M5EchoBase.cpp"
         "echobase/es8311.cpp"
     INCLUDE_DIRS "." "echobase" "sam"
-    REQUIRES ${FOX_REQUIRES}
+    REQUIRES ${FOX_REQUIRES} esp-sr
 )
 
 # Our style uses some compact one-liners and cross-TU helpers that the IDF

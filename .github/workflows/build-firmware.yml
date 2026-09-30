@@ -18,8 +18,6 @@ concurrency:
 jobs:
   data:
     runs-on: ubuntu-latest
-    outputs:
-      ir_sha: ${{ steps.ir.outputs.sha }}
     steps:
       - uses: actions/checkout@v4
       - name: Locate sources (self-healing bootstrap)
@@ -134,16 +132,29 @@ jobs:
           FOXBRAIN_OFFSET=$(python3 -c "import csv; print(next(int(r[3],16) for r in csv.reader(open('firmware/partitions.csv')) if r and r[0].strip()=='foxbrain'))")
           PICO_TA_OFFSET=$(python3 -c "import csv; print(next(int(r[3],16) for r in csv.reader(open('firmware/partitions.csv')) if r and r[0].strip()=='picotts_ta'))")
           PICO_SG_OFFSET=$(python3 -c "import csv; print(next(int(r[3],16) for r in csv.reader(open('firmware/partitions.csv')) if r and r[0].strip()=='picotts_sg'))")
-          PICO_PRESENT=0
+          # PicoTTS language resources: required (the chatterbox voice). Sizes
+          # are checked against partitions.csv so a too-small slot fails here,
+          # not on the device ("wrong partition size").
           TA_FILE=$(find firmware/build -name picotts_ta.bin -print -quit || true)
           SG_FILE=$(find firmware/build -name picotts_sg.bin -print -quit || true)
-          if [ -n "$TA_FILE" ] && [ -n "$SG_FILE" ]; then
-            cp "$TA_FILE" dist/picotts_ta.bin
-            cp "$SG_FILE" dist/picotts_sg.bin
-            test $(stat -c%s dist/picotts_ta.bin) -le $((0x0a0000))
-            test $(stat -c%s dist/picotts_sg.bin) -le $((0x0c0000))
-            PICO_PRESENT=1
+          if [ -z "$TA_FILE" ] || [ -z "$SG_FILE" ]; then
+            echo "::error::PicoTTS picotts_ta.bin / picotts_sg.bin not produced by the build"; exit 1
           fi
+          cp "$TA_FILE" dist/picotts_ta.bin
+          cp "$SG_FILE" dist/picotts_sg.bin
+          python3 - <<'PY2'
+          import csv, os
+          parts={r[0].strip():int(r[4],16) for r in csv.reader(open('firmware/partitions.csv')) if r and not r[0].startswith('#') and len(r)>4}
+          for name in ('picotts_ta','picotts_sg'):
+              n=os.path.getsize(f'dist/{name}.bin')
+              assert n<=parts[name], f'{name}.bin ({n}) exceeds its partition ({parts[name]})'
+              print(name,'bytes',n,'partition',parts[name])
+          PY2
+          PICO_PRESENT=1
+          # The speech model must contain an English MultiNet (mn7_en), or the
+          # fox cannot recognise commands. srmodels.bin embeds model dir names.
+          grep -a -q "mn7_en" dist/srmodels.bin || { echo "::error::srmodels.bin has no mn7_en English MultiNet — check CONFIG_SR_MN_EN_* in sdkconfig.defaults"; exit 1; }
+          echo "srmodels contains mn7_en: OK"
           cd dist
           sha256sum * > SHA256SUMS
           gen() {

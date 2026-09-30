@@ -16,6 +16,12 @@ CONFIG_SPIRAM_USE_MALLOC=y
 CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=8192
 CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
 
+# ---- Code size -------------------------------------------------------------
+# The IDF default is -Og (debug). -Os is what Arduino builds use and keeps the
+# app inside its 3.25MB slot with room to grow (esp-sr/PicoTTS are prebuilt
+# libraries and are unaffected).
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+
 # ---- Tasks / CPU -------------------------------------------------------------
 # setup()/loop() run on the main task (see app_main in fox_main.cpp). The IDF
 # default main stack is 3584 bytes — far too small; overflow silently corrupts

@@ -52,11 +52,32 @@ void audio_mic_end() {
 
 bool audio_record(int16_t* buf, size_t size_samples) {
     if (!g_echo_ok || !buf || !size_samples) return false;
-    // Read the raw interleaved I2S stream directly (this is the read that WORKS
-    // on this ES8311 for VAD/FFT/lip-sync). The previous "stereo -> keep LEFT"
-    // extraction read the SILENT slot on this codec, which killed the mic when
-    // the audio-reactive toys were added.
-    return g_echo.record((uint8_t*)buf, (int)(size_samples * sizeof(int16_t)));
+
+    // EchoBase is configured for stereo 16-bit I2S.
+    // We want size_samples of MONO samples, so we must read
+    // size_samples stereo frames = size_samples * 2 int16 values.
+    const size_t stereo_samples = size_samples * 2;
+    const size_t bytes = stereo_samples * sizeof(int16_t);
+
+    int16_t* stereo = (int16_t*)heap_caps_malloc(
+        bytes,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
+    );
+
+    if (!stereo) return false;
+
+    bool ok = g_echo.record((uint8_t*)stereo, (int)bytes);
+
+    if (ok) {
+        // The ES8311 microphone signal is on the RIGHT I2S slot
+        // on this hardware. The LEFT slot is effectively silent.
+        for (size_t i = 0; i < size_samples; ++i) {
+            buf[i] = stereo[i * 2 + 1];
+        }
+    }
+
+    free(stereo);
+    return ok;
 }
 
 // Write mono int16 @ SAMPLE_RATE as stereo interleaved to EchoBase.

@@ -190,7 +190,6 @@ static const MenuItem MENU[] = {
     {"WiFi radar",         "wifi_radar"},
     {"hunt mode",          "sniffer"},
     {"probe sniffer",      "probes"},
-    {"learn my TV",        "learn_tv"},
     {"-- games --",        "nop"},
     {"roguelike maze",     "maze"},
     {"wormhole (tilt)",    "wormhole"},
@@ -290,6 +289,10 @@ static void apply_config_json(const String& js) {
     if (d["name"].is<const char*>())  cfg.name = d["name"].as<String>();
     if (d["tz"].is<const char*>())    cfg.timezone = d["tz"].as<String>();
     if (d["weather"].is<const char*>()) cfg.weather = d["weather"].as<String>();
+    if (d["voice_speed"].is<int>())  cfg.voice_speed  = (uint8_t)constrain((int)d["voice_speed"],  40, 130);
+    if (d["voice_pitch"].is<int>())  cfg.voice_pitch  = (uint8_t)constrain((int)d["voice_pitch"],  16, 100);
+    if (d["voice_throat"].is<int>()) cfg.voice_throat = (uint8_t)constrain((int)d["voice_throat"], 90, 255);
+    if (d["voice_mouth"].is<int>())  cfg.voice_mouth  = (uint8_t)constrain((int)d["voice_mouth"],  90, 255);
     if (d["ssid"].is<const char*>())  cfg.wifi_ssid = d["ssid"].as<String>();
     if (d["pass"].is<const char*>())  cfg.wifi_pass = d["pass"].as<String>();
     if (d["key"].is<const char*>())   cfg.api_key = d["key"].as<String>();

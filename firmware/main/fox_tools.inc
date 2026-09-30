@@ -177,17 +177,42 @@ static void radar_draw(float green_angle, float red_angle, bool wifi, bool finis
     face_canvas->fillEllipse(cx,cy+2,5,4,fur);
     face_canvas->fillCircle(cx-2,cy+1,1,0x0000); face_canvas->fillCircle(cx+2,cy+1,1,0x0000);
 
-    float ga = (green_angle - 90) * PI / 180.0f;
-    float ra = (red_angle - 90) * PI / 180.0f;
-    face_canvas->drawLine(cx, cy, cx + (int)(R*cosf(ga)), cy + (int)(R*sinf(ga)), 0x07E0);
-    face_canvas->drawLine(cx, cy, cx + (int)(R*cosf(ra)), cy + (int)(R*sinf(ra)), 0xF800);
+    // Decorative radar sweep angle (used only after the rotation is finished).
+    float sweep = fmodf(millis() * 0.18f, 360.0f);
+
+    if (!finished) {
+        // ROTATION PHASE: red = target pace, green = your live IMU heading.
+        // Match the green needle to the red one all the way around the circle.
+        float ga = (green_angle - 90) * PI / 180.0f;
+        float ra = (red_angle - 90) * PI / 180.0f;
+        face_canvas->drawLine(cx, cy, cx + (int)(R*cosf(ra)), cy + (int)(R*sinf(ra)), 0xF800);
+        face_canvas->drawLine(cx, cy, cx + (int)(R*cosf(ga)), cy + (int)(R*sinf(ga)), 0x07E0);
+    } else {
+        // DONE: purely-decorative rotating sweep arm with a fading green trail
+        // (the classic radar look). The spatial plot is already fixed; this just
+        // animates over it.
+        for (int t = 60; t >= 0; t -= 6) {
+            float sa = (sweep - t - 90) * PI / 180.0f;
+            uint16_t col = (uint16_t)(((uint8_t)((63 - t)) >> 1) << 5);  // green ramp
+            face_canvas->drawLine(cx, cy, cx + (int)(R*cosf(sa)), cy + (int)(R*sinf(sa)), col);
+        }
+    }
 
     for (int i = 0; i < radar_n; ++i) {
         RadarSource& d = radar_sources[i];
-        float a = (radar_peak_angle(d) - 90) * PI / 180.0f;
+        float bearing = radar_peak_angle(d);
+        float a = (bearing - 90) * PI / 180.0f;
         float rr = R * radar_range(d);
         int x = cx + (int)(rr*cosf(a)), y = cy + (int)(rr*sinf(a));
-        face_canvas->fillCircle(x, y, 3, d.seen && millis()-d.seen < 3000 ? fur : 0x8410);
+        // Light the blip when the decorative sweep passes over its bearing.
+        bool lit = false;
+        if (finished) {
+            float da = fabsf(bearing - sweep); if (da > 180) da = 360 - da;
+            lit = da < 18.0f;
+        }
+        uint16_t col = lit ? 0x07E0
+                     : (d.seen && millis()-d.seen < 3000 ? fur : 0x8410);
+        face_canvas->fillCircle(x, y, lit ? 4 : 3, col);
     }
     face_canvas->setTextDatum(top_left); face_canvas->setTextColor(acc);
     face_canvas->drawString(wifi ? "WIFI RADAR" : "BLE RADAR", 2, 2);
@@ -198,7 +223,7 @@ static void radar_draw(float green_angle, float red_angle, bool wifi, bool finis
     face_canvas->pushSprite(0, 0);
 }
 
-static void radar_draw_prompt(bool wifi, float progress) {
+__attribute__((unused)) static void radar_draw_prompt(bool wifi, float progress) {
     face_canvas->fillSprite(cfg.color_bg);
     face_canvas->setTextDatum(middle_center);
     face_canvas->setTextColor(cfg.color_accent);
@@ -263,7 +288,10 @@ static void radar_run(bool wifi) {
             last_scan = now;
             if (wifi) radar_scan_wifi(green); else radar_scan_ble(green);
         }
-        radar_draw_prompt(wifi, (red / 360.0f));
+        // DURING rotation: show the actual radar — fox centered, green (your
+        // live IMU heading) chasing red (the target pace), and sources popping in
+        // as they're detected. This is the matching game; no text histogram.
+        radar_draw(green, red, wifi, false);
         if (red > 355.0f && err < 28.0f) sweep = false;
         if (now-start > 45000) sweep = false;
         delay(8);
@@ -274,8 +302,8 @@ static void radar_run(bool wifi) {
         M5.update();
         if (M5.BtnA.wasDoubleClicked()) { tool_radio_release(); return; }
         if (M5.BtnA.wasClicked()) { break; }
-        radar_draw(green, red, wifi, true);
-        delay(80);
+        radar_draw(green, red, wifi, true);   // animates the decorative sweep
+        delay(33);
     }
     tool_radio_release();
   }

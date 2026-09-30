@@ -15,7 +15,6 @@
 //   fox_voice.cpp   Pico / critter / babble speech
 //   fox_memory.cpp  device-owned rolling journal
 //   fox_llm.cpp     optional tiny on-device brain (safe: can't invent facts)
-//   fox_ir.cpp      IR sweep + fake-learning (this file includes helpers)
 //
 // Seven concrete bugs from the previous core are fixed here; each is called out
 // with a "// FIX:" comment where it lives.
@@ -80,6 +79,10 @@ static void load_config() {
     cfg.tool_imu    = prefs.getBool("timu", cfg.tool_imu);
     cfg.lip_sync    = prefs.getBool("lips", cfg.lip_sync);
     cfg.volume      = prefs.getUChar("vol", cfg.volume);
+    cfg.voice_speed = prefs.getUChar("vsp", cfg.voice_speed);
+    cfg.voice_pitch = prefs.getUChar("vpi", cfg.voice_pitch);
+    cfg.voice_throat= prefs.getUChar("vth", cfg.voice_throat);
+    cfg.voice_mouth = prefs.getUChar("vmo", cfg.voice_mouth);
     cfg.color_primary = prefs.getUShort("cpri", cfg.color_primary);
     cfg.color_accent  = prefs.getUShort("cacc", cfg.color_accent);
     cfg.color_bg      = prefs.getUShort("cbg", cfg.color_bg);
@@ -112,6 +115,10 @@ void save_config() {
     prefs.putBool("timu", cfg.tool_imu);
     prefs.putBool("lips", cfg.lip_sync);
     prefs.putUChar("vol", cfg.volume);
+    prefs.putUChar("vsp", cfg.voice_speed);
+    prefs.putUChar("vpi", cfg.voice_pitch);
+    prefs.putUChar("vth", cfg.voice_throat);
+    prefs.putUChar("vmo", cfg.voice_mouth);
     prefs.putUShort("cpri", cfg.color_primary);
     prefs.putUShort("cacc", cfg.color_accent);
     prefs.putUShort("cbg", cfg.color_bg);
@@ -132,8 +139,8 @@ static const Command COMMANDS[] = {
     {3,  "how are you;how do you feel",           "mood"},
     {4,  "what is the weather;weather",           "weather"},
     {5,  "turn off the tv;power off tv",          "ir_tv_power"},
-    {6,  "volume up",                              "ir_vol_up"},
-    {7,  "volume down",                            "ir_vol_dn"},
+    {6,  "volume up",                              "vol_up"},
+    {7,  "volume down",                            "vol_dn"},
     {8,  "go to sleep;good night",                 "sleep"},
     {9,  "conversation mode;lets chat",            "conv_on"},
     {10, "remember this",                          "remember"},
@@ -149,7 +156,6 @@ static const Command COMMANDS[] = {
     {19, "space weather;solar storm",               "space"},
     {20, "any aurora;northern lights",              "aurora"},
     {21, "lip sync mode;puppet mode",               "lipsync"},
-    {22, "learn my tv;learn the remote",            "learn_tv"},
     {23, "hunt mode;pwnagotchi",                     "sniffer"},
     {24, "explore the maze;lets explore",           "maze"},
     {25, "play with me;lets hang out",              "encounter"},
@@ -315,7 +321,6 @@ static String run_tool(const String& name, JsonVariantConst args) {
     if (name == "wifi_scan")  return String(tool_wifi_scan_report());
     if (name == "space_weather") return net_space_weather();
     if (name == "weather")    return net_weather();
-    if (name == "tv_power")   { ir_command("tv", "power"); return "{\"ok\":true}"; }
     return "{\"error\":\"unknown tool\"}";
 }
 
@@ -449,7 +454,6 @@ static String cloud_transcribe(int16_t* audio, size_t samples) {
 // tools/games/menu; tools defines imu_heading_deg() used by games; input's menu
 // dispatches into everything.
 #include "fox_face.inc"   // animated fox face + FFT mic lip-sync
-#include "fox_ir.inc"     // IR sweep + fake-learning (RMT TX on GPIO47)
 #include "fox_tools.inc"  // BLE/WiFi radar, packet sniffer, pwnagotchi hunt, probes
 #include "fox_bayes.inc"  // Bayesian 20-questions guesser
 #include "fox_games.inc"  // wormhole, catch, reaction, paw
@@ -499,7 +503,6 @@ static void launch(const char* id) {
     else if (!strcmp(id, "spiro"))      toy_spiro();
     else if (!strcmp(id, "probes"))     { if (cfg.tool_wifi) tool_menu_probe_sniff(); else speak("wifi is switched off"); }
     else if (!strcmp(id, "lipsync"))    face_lipsync_mode();
-    else if (!strcmp(id, "learn_tv"))   ir_narrow_power();
     else if (!strcmp(id, "weather"))    speak(net_weather());
     else if (!strcmp(id, "space"))      speak(net_space_weather());
     else if (!strcmp(id, "aurora"))     speak(net_aurora());
@@ -530,12 +533,12 @@ static void do_action(const char* action) {
     } else if (!strcmp(action, "mood")) {
         static const char* M[] = {"i'm sleepy", "i'm calm", "i'm happy", "i'm excited", "i'm a bit grumpy"};
         speak(M[fox_mood(needs)]);
-    } else if (!strcmp(action, "ir_tv_power")) {
-        ir_command("tv", "power");
-    } else if (!strcmp(action, "ir_vol_up")) {
-        ir_command("tv", "vol_up");
-    } else if (!strcmp(action, "ir_vol_dn")) {
-        ir_command("tv", "vol_dn");
+    } else if (!strcmp(action, "vol_up")) {
+        cfg.volume = (uint8_t)min(110, cfg.volume + 15); audio_set_volume(cfg.volume);
+        save_config(); speak("louder!");
+    } else if (!strcmp(action, "vol_dn")) {
+        cfg.volume = (uint8_t)(cfg.volume > 15 ? cfg.volume - 15 : 0); audio_set_volume(cfg.volume);
+        save_config(); speak("quieter~");
     } else if (!strcmp(action, "sleep")) {
         speak("okay... good night");
         enter_light_sleep();
@@ -653,6 +656,10 @@ static uint32_t last_activity = 0;
 static uint32_t last_idle_chatter = 0;
 
 void setup() {
+    // HWCDC (USB-Serial-JTAG) RX: size the buffer for a full config line BEFORE
+    // begin(), and begin() early so bytes never arrive first (arduino-esp32
+    // #9316: pre-begin bytes wedge the RX interrupt until a hardware reset).
+    Serial.setRxBufferSize(2048);
     Serial.begin(115200);
     delay(50);
     Serial.println("FOX: setup FOX_GH_lp5562");
@@ -696,7 +703,6 @@ void setup() {
     // the device — the fox still boots to a working face.
     mem_begin();        Serial.println("FOX: mem ok");
     voice_begin(cfg);   Serial.println("FOX: voice ok");
-    ir_begin();         Serial.println("FOX: ir ok");
     input_begin();      Serial.println("FOX: input ok");
 
     // Offline speech is the core, but its esp-sr init allocates large PSRAM

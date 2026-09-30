@@ -43,10 +43,6 @@ void face_think();
 void face_set_mouth(float level01);
 void face_lipsync_mode();
 
-// ---- IR (fox_ir.inc) --------------------------------------------------------
-void ir_begin();
-void ir_command(const char* category, const char* button);
-void ir_narrow_power();
 
 // ---- tools: radar / sniffer / pwnagotchi (fox_tools.inc) -------------------
 float imu_heading_deg();

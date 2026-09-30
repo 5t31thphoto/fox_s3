@@ -26,3 +26,25 @@ CONFIG_BT_CONTROLLER_ONLY=n
 CONFIG_BT_NIMBLE_ROLE_OBSERVER=y
 CONFIG_MBEDTLS_PSK_MODES=y
 CONFIG_MBEDTLS_KEY_EXCHANGE_PSK=y
+
+# WiFi/BT software coexistence — REQUIRED because the NimBLE controller stays up
+# for the life of the fox, so the WiFi/BLE radar tools contend for the radio.
+# Without these, WiFi STA (AP radar) or BLE scan silently fails to init -> the
+# radar sees nothing. (This was missing; it's why WiFi/BLE "don't initialize".)
+CONFIG_ESP_COEX_SW_COEXIST_ENABLE=y
+CONFIG_ESP_WIFI_SW_COEXIST_ENABLE=y
+
+# PicoTTS needs ~1MB of working RAM. Route large mallocs to PSRAM so its lingware
+# tables don't OOM internal SRAM. (PSRAM is already enabled for the AtomS3R.)
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+
+# Put Serial AND the console on the ONE bidirectional USB-Serial-JTAG interface.
+# The device was enumerating as "esp32" (TinyUSB CDC) for Arduino Serial while
+# the boot log went to the JTAG console — two different USB endpoints — so the
+# web flasher's config write never reached input_poll() and FOX_CONFIG_OK never
+# came back. HWCDC (mode 1) + JTAG console = one port the browser reads & writes.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ARDUINO_USB_MODE=1
+CONFIG_ARDUINO_USB_CDC_ON_BOOT=1

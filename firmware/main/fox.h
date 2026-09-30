@@ -6,7 +6,6 @@
 
 // ---- hardware ---------------------------------------------------------------
 static constexpr gpio_num_t USER_GPIO   = GPIO_NUM_41;  // AtomS3R USER button, active-low
-static constexpr gpio_num_t IR_TX_GPIO  = GPIO_NUM_47;  // AtomS3R on-board IR LED
 static constexpr int   SAMPLE_RATE      = 16000;        // AFE + MultiNet + PicoTTS all want 16k
 
 // Echo Base I2S / I2C (M5Unified drives these once we set external_speaker.atomic_echo)
@@ -74,6 +73,10 @@ struct FoxConfig {
     bool   tool_context  = true;
     bool   lip_sync      = true;   // drive the mouth from mic FFT while listening
     uint8_t volume       = 70;
+    uint8_t voice_speed  = 76;   // SAM voice tuning (cute-female defaults)
+    uint8_t voice_pitch  = 46;   // SAM pitch is inverse: lower = higher voice
+    uint8_t voice_throat = 150;
+    uint8_t voice_mouth  = 188;
     uint16_t color_primary = 0xFB43;  // rgb565 orange (#ff6b35)
     uint16_t color_accent  = 0xF618;  // cream (#f7c59f)
     uint16_t color_bg      = 0x08A6;  // deep indigo (#0f0f1a)

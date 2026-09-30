@@ -1,5 +1,6 @@
 // Real SAM (Software Automatic Mouth) via ESP8266SAM / s-macke port.
 // Collects 8-bit unsigned mono @ 22050 Hz into a malloc buffer for fox_voice.
+#include "esp_heap_caps.h"
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,7 +21,7 @@ static void sam_cb(void* user, unsigned char b) {
     SamBuf* s = (SamBuf*)user;
     if (s->length >= s->capacity) {
         int nc = s->capacity ? s->capacity * 2 : 8192;
-        uint8_t* n = (uint8_t*)realloc(s->buf, nc);
+        uint8_t* n = (uint8_t*)heap_caps_realloc(s->buf, nc, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (!n) return;
         s->buf = n;
         s->capacity = nc;
@@ -64,7 +65,7 @@ int sam_render(const char* text, uint8_t speed, uint8_t pitch,
     SetInput(input);
 
     SamBuf sb = {0};
-    sb.buf = (uint8_t*)malloc(16384);
+    sb.buf = (uint8_t*)heap_caps_malloc(16384, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!sb.buf) {
         free(samdata);
         samdata = NULL;

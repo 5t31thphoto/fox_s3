@@ -81,7 +81,13 @@ static bool pico_say(const String& text) {
     }
     picotts_set_idle_notify(pico_idle);
     picotts_set_error_notify(pico_err);
-    picotts_add(text.c_str(), text.length() + 1);
+    // PicoTTS buffers text until it sees a sentence terminator; without one it
+    // never flushes (-> 12s timeout -> SAM). Guarantee a . ! or ? at the end,
+    // and feed len+1 so the null terminator enters the analysis queue.
+    String t = text; t.trim();
+    char lc = t.length() ? t[t.length()-1] : '.';
+    if (lc != '.' && lc != '!' && lc != '?') t += '.';
+    picotts_add(t.c_str(), t.length() + 1);
     uint32_t guard = millis();
     while (!s_tts_done && millis() - guard < 12000) { M5.update(); delay(4); }
     picotts_shutdown();
@@ -94,27 +100,64 @@ static bool pico_say(const String& text) {
 #endif
 
 // ---- SAM path ---------------------------------------------------------------
+// A short "breath" of silence for natural rhythm between phrases.
+static void sam_pause(int ms) {
+    uint32_t t0 = millis();
+    while (millis() - t0 < (uint32_t)ms) { M5.update(); delay(4); }
+}
+
+// Speak with SAM, AUTO-CHUNKED into phrases at punctuation. Each phrase renders
+// separately (so any length works and every chunk stays under SAM's per-call
+// limit) and is voiced with slight expressive variation + a rhythm pause keyed
+// to its punctuation — questions lilt up, exclamations get punchy, periods
+// settle, commas take a quick breath. Base cute-female voice: 76/46/150/188.
 static bool sam_say(const String& text) {
-    // SAM "Little Robot" tuning: deliberately warm/robotic rather than the
-    // default C64 settings. These are the established SAM voice parameters
-    // used for a small robot character: speed 92, pitch 60, throat 190,
-    // mouth 190. The synth itself remains the real SAM/ESP8266SAM engine.
-    uint8_t* pcm = nullptr; int len = 0;
-    if (!sam_render(text.c_str(), 92, 60, 190, 190, &pcm, &len) || !pcm)
-        return false;
-    if (!g_echo_ok) { sam_free(pcm); return false; }
+    if (!g_echo_ok) return false;
+    String s = text; s.trim();
+    if (s.length() == 0) return false;
     audio_set_volume(g_cfg.volume > 100 ? 100 : g_cfg.volume);
-    // Play in ~40ms chunks (22050Hz 8-bit) so the mouth lip-syncs.
-    const int CH = 900;
-    for (int off = 0; off < len; off += CH) {
-        int n = min(CH, len - off);
-        mouth_from_pcm8(pcm + off, n, g_speaking_mood);
-        audio_play_pcm8(pcm + off, n, 22050);
-        while (audio_is_playing()) { M5.update(); delay(2); }
+
+    const int L = s.length();
+    int start = 0;
+    bool spoke = false;
+    for (int i = 0; i <= L; ++i) {
+        bool eos = (i == L);
+        char c = eos ? '.' : s[i];
+        bool punct = (c=='.'||c=='!'||c=='?'||c==','||c==';'||c==':');
+        bool boundary = eos || punct;
+        if (!boundary && (i - start) < 130) continue;   // also split runaway phrases
+
+        String phrase = s.substring(start, i);
+        phrase.trim();
+        start = i + 1;
+        if (phrase.length() == 0) continue;
+
+        uint8_t bsp=g_cfg.voice_speed?g_cfg.voice_speed:76, bpi=g_cfg.voice_pitch?g_cfg.voice_pitch:46;
+        uint8_t bth=g_cfg.voice_throat?g_cfg.voice_throat:150, bmo=g_cfg.voice_mouth?g_cfg.voice_mouth:188;
+        uint8_t speed=bsp, pitch=bpi, throat=bth, mouth=bmo;
+        int pause = 70;
+        if (c == '?')      { pitch = (bpi>4?bpi-4:bpi); mouth = (uint8_t)min(255,bmo+8);  pause = 200; }  // curious lilt
+        else if (c == '!') { speed = (bsp>6?bsp-6:bsp); mouth = (uint8_t)min(255,bmo+14); pause = 200; }  // excited punch
+        else if (c == '.') { pause = 190; }                           // settle
+        else if (c==','||c==';'||c==':') { pause = 110; }             // quick breath
+
+        uint8_t* pcm = nullptr; int len = 0;
+        if (sam_render(phrase.c_str(), speed, pitch, throat, mouth, &pcm, &len) && pcm) {
+            spoke = true;
+            const int CH = 900;   // ~40ms @22050 for smooth lip-sync
+            for (int off = 0; off < len; off += CH) {
+                int n = min(CH, len - off);
+                mouth_from_pcm8(pcm + off, n, g_speaking_mood);
+                audio_play_pcm8(pcm + off, n, 22050);
+                while (audio_is_playing()) { M5.update(); delay(2); }
+            }
+            sam_free(pcm);
+        }
+        face_set_mouth(0); face_draw(g_speaking_mood);
+        if (!eos) sam_pause(pause);   // rhythm between phrases
     }
     face_set_mouth(0); face_draw(g_speaking_mood);
-    sam_free(pcm);
-    return true;
+    return spoke;
 }
 
 // ---- babble fallback --------------------------------------------------------

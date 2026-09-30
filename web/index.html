@@ -192,6 +192,18 @@
       <div><label for="pass">Wifi password</label><input id="pass" type="password"></div>
       <div><label for="weather">City or ZIP <span class="hint">(weather &amp; aurora)</span></label><input id="weather" placeholder="ZIP or city" placeholder="Denver"></div>
       <div><label for="volume">Volume</label><input id="volume" type="range" min="0" max="110" value="70"></div>
+      <div class="full"><label>Voice (SAM) <span class="hint">— tune her, then Preview</span></label>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px 16px">
+          <label style="font-weight:600">Pitch <span class="hint">(lower=higher)</span><input id="vpitch" type="range" min="20" max="90" value="46"></label>
+          <label style="font-weight:600">Speed<input id="vspeed" type="range" min="50" max="120" value="76"></label>
+          <label style="font-weight:600">Throat<input id="vthroat" type="range" min="100" max="240" value="150"></label>
+          <label style="font-weight:600">Mouth<input id="vmouth" type="range" min="100" max="240" value="188"></label>
+        </div>
+        <div style="display:flex;gap:10px;align-items:center;margin-top:8px">
+          <input id="vtext" value="hi! i'm your fox. wanna play?" maxlength="80" style="flex:1">
+          <button class="cta ghost" id="vpreview" type="button">▶ Preview</button>
+        </div>
+        <span id="vnote" class="hint"></span></div>
       <div class="full"><label for="key">Online brain API key <span class="hint">(optional — Groq free tier works great)</span></label><input id="key" type="password" placeholder="gsk_…"></div>
       <div><label for="cmodel">Chat model</label><input id="cmodel" value="llama-3.1-8b-instant"></div>
       <div><label for="abase">API base URL</label><input id="abase" value="https://api.groq.com/openai/v1"></div>
@@ -205,7 +217,6 @@
         <div class="swatches" style="gap:14px">
           <label style="font-weight:600"><input type="checkbox" id="t_ble" checked> BLE radar</label>
           <label style="font-weight:600"><input type="checkbox" id="t_wifi" checked> WiFi radar &amp; sniffer</label>
-          <label style="font-weight:600"><input type="checkbox" id="t_ir" checked> IR blaster</label>
           <label style="font-weight:600"><input type="checkbox" id="t_imu" checked> IMU games</label>
           <label style="font-weight:600"><input type="checkbox" id="t_lip" checked> mic lip-sync</label>
         </div></div>
@@ -370,25 +381,71 @@
 
   document.getElementById('reconnect').onclick=connect;
 
-  document.getElementById('send').onclick=async()=>{
-    if(!writer && !(await connect())) return;
-    const cfg={
+  // ---- in-browser SAM voice preview (sam-js) ----
+  let SamMod=null;
+  document.getElementById('vpreview').onclick=async()=>{
+    const note=document.getElementById('vnote');
+    const opts={ speed:+document.getElementById('vspeed').value,
+                 pitch:+document.getElementById('vpitch').value,
+                 throat:+document.getElementById('vthroat').value,
+                 mouth:+document.getElementById('vmouth').value };
+    const text=document.getElementById('vtext').value||"hi";
+    try{
+      if(!SamMod){ note.textContent='loading voice…'; SamMod=(await import('https://cdn.jsdelivr.net/npm/sam-js@0.2.1/+esm')).default; }
+      note.textContent='';
+      await new SamMod(opts).speak(text);
+    }catch(err){ note.innerHTML='<span class="warn">Preview needs internet; it still flashes to the fox fine.</span>'; }
+  };
+
+  // ---- shared config builder (used by manual send AND first-flash) ----
+  function buildConfig(){
+    return {
       name:val('name'), tz:val('tz'), personality:val('pers'),
       ssid:val('ssid'), pass:val('pass'), weather:val('weather'),
       key:val('key'), chat_model:val('cmodel'), api_base:val('abase'),
       mode:document.getElementById('mode').value,
       voice: pack==='A' ? 'chatterbox' : 'chatterbox',
       volume:parseInt(val('volume'),10),
+      voice_speed:+document.getElementById('vspeed').value,
+      voice_pitch:+document.getElementById('vpitch').value,
+      voice_throat:+document.getElementById('vthroat').value,
+      voice_mouth:+document.getElementById('vmouth').value,
       splash: document.getElementById('splash').value,
-      splash_fx: fx,
-      theme: THEMES.indexOf(theme),
-      tool_ble:  document.getElementById('t_ble').checked,
-      tool_wifi: document.getElementById('t_wifi').checked,
-      tool_ir:   document.getElementById('t_ir').checked,
-      tool_imu:  document.getElementById('t_imu').checked,
-      lip_sync:  document.getElementById('t_lip').checked,
+      splash_fx: fx, theme: THEMES.indexOf(theme),
+      tool_ble: document.getElementById('t_ble').checked,
+      tool_wifi:document.getElementById('t_wifi').checked,
+      tool_imu: document.getElementById('t_imu').checked,
+      lip_sync: document.getElementById('t_lip').checked,
       cpri: fur.p, cacc:0xFED4, cbg: theme.cbg
     };
+  }
+  function configFilled(){
+    return !!(val('name') || val('ssid') || val('key') || val('weather') ||
+              document.getElementById('splash').value.trim() || val('pers'));
+  }
+
+  // ---- FIRST-FLASH: auto-apply settings right after flashing, reusing the port
+  // esp-web-tools already opened (no separate USB step). Blank form => plain flash.
+  flashBtn.addEventListener('state-changed', async (e)=>{
+    if(!(e.detail && e.detail.state==='FINISHED')) return;
+    if(!configFilled()){ echo.textContent='flashed! (no settings entered — plain flash)'; return; }
+    echo.textContent='flashed! applying your settings…';
+    await new Promise(r=>setTimeout(r,5000));           // let the fox reboot
+    try{
+      const ports=await navigator.serial.getPorts();    // already granted, no picker
+      if(!ports.length){ echo.textContent='flashed! use Step 2 to send settings.'; return; }
+      const pt=ports[0];
+      if(!pt.readable) await pt.open({baudRate:115200});
+      const w=pt.writable.getWriter();
+      await w.write(new TextEncoder().encode(JSON.stringify(buildConfig())+'\n'));
+      w.releaseLock();
+      echo.innerHTML='<span class="ok">flashed &amp; personalized — say hi to your fox! 🦊</span>';
+    }catch(err){ echo.textContent='flashed! (auto-send failed — use Step 2)'; }
+  });
+
+  document.getElementById('send').onclick=async()=>{
+    if(!writer && !(await connect())) return;
+    const cfg=buildConfig();
     const line=JSON.stringify(cfg)+'\n';
     await writer.write(new TextEncoder().encode(line));
     status.innerHTML='<span class="ok">sent ✓</span>';

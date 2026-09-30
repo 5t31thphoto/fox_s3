@@ -18,7 +18,16 @@ void face_begin(FoxConfig& c) {
     M5.Display.setColorDepth(16);
     /* brightness set once at boot via LP5562 */
     face_canvas = new M5Canvas(&M5.Display);
-    face_canvas->createSprite(128, 128);
+    // M5Canvas(parent) defaults to a PSRAM buffer when PSRAM exists. Pushing a
+    // PSRAM canvas to the panel corrupts frames on the ESP32-S3 (the face,
+    // menu, games and tools all share this one canvas). Keep it in internal
+    // DMA RAM — exactly where it lived before PSRAM was enabled.
+    face_canvas->setPsram(false);
+    if (!face_canvas->createSprite(128, 128)) {
+        Serial.println("FOX: canvas: no internal DMA RAM, falling back to PSRAM");
+        face_canvas->setPsram(true);
+        face_canvas->createSprite(128, 128);
+    }
     face_canvas->setTextDatum(middle_center);
 }
 

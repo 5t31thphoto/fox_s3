@@ -13,7 +13,9 @@ dependencies:
   # on. Both pinned from git so their versions stay mutually compatible.
   m5stack/m5gfx:
     git: https://github.com/m5stack/M5GFX.git
-    version: "master"
+    # FROZEN at the commit that drives this AtomS3R panel (CI 2026-09-30).
+    # "master" silently changed display code between builds.
+    version: "cd363dde6362ab3f9419661cf3ab7a6b4f06f620"
   m5stack/m5unified:
     git: https://github.com/m5stack/M5Unified.git
     version: "master"

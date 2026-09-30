@@ -72,7 +72,7 @@ bool audio_record(int16_t* buf, size_t size_samples) {
         // The ES8311 microphone signal is on the RIGHT I2S slot
         // on this hardware. The LEFT slot is effectively silent.
         for (size_t i = 0; i < size_samples; ++i) {
-            buf[i] = stereo[i * 2 + 1];
+            buf[i] = stereo[i * 2];
         }
     }
 

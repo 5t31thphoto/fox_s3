@@ -10,8 +10,12 @@ name: drop_zip
 #      are restored even though your local unzipper hides them),
 #   3. if the zip wraps everything in a single top folder, flattens it,
 #   4. overlays onto the repo (add + replace; nothing deleted),
-#   5. commits the result and deletes the consumed zip,
-#   6. which then triggers build-firmware.yml normally.
+#   5. commits the result and deletes the consumed zip.
+# NOTE: a push made with GITHUB_TOKEN never triggers other workflows. The build
+# runs because YOUR zip push triggers build-firmware.yml, which expands the zip
+# itself ("self-healing bootstrap"). Zips must NOT contain .github/workflows
+# (the token can't write workflow files); ship those as github/workflows and
+# move them into .github/workflows yourself.
 #
 # Because CI's `unzip` handles hidden folders correctly, the ".github doesn't
 # unzip right locally" problem never bites you — the archive is expanded here,

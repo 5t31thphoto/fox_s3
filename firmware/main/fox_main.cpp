@@ -27,6 +27,7 @@
 #include <Preferences.h>
 #include <esp_sleep.h>
 #include <esp_heap_caps.h>
+#include <esp_log.h>
 #include <esp_partition.h>
 #include <math.h>
 
@@ -269,6 +270,7 @@ static bool init_speech() {
     }
     esp_mn_commands_update();
     Serial.printf("FOX: MultiNet phrases added=%d rejected=%d\n", added, rejected);
+    esp_log_level_set("AFE", ESP_LOG_ERROR);   // fetch-while-draining is expected to find it empty
     mn->print_active_speech_commands(mn_data);
     if (afe->get_fetch_chunksize(afe_data) != mn->get_samp_chunksize(mn_data)) {
         Serial.println("FOX: AFE/MultiNet frame mismatch"); return false;
@@ -279,34 +281,52 @@ static bool init_speech() {
 
 static int recognize_offline(int16_t* audio, size_t samples) {
     if (!speech_ready || !audio || samples < SAMPLE_RATE / 4) return -1;
-    const int feed_n = afe->get_feed_chunksize(afe_data);
+    const int feed_n  = afe->get_feed_chunksize(afe_data);
+    const int fetch_n = afe->get_fetch_chunksize(afe_data);
     afe->reset_buffer(afe_data);
     mn->clean(mn_data);                          // no state left from last turn
     int16_t* in = (int16_t*)fox_alloc(feed_n * sizeof(int16_t));
     if (!in) return -1;
-    // PTT audio ends the instant the button is released. AFE has a few frames
-    // of latency and MultiNet only commits a result after trailing silence, so
-    // append ~0.7s of silence to flush the pipeline.
-    const size_t tail = SAMPLE_RATE * 7 / 10;
+
+    // Feed the utterance plus ~0.8s of silence (MultiNet commits a result only
+    // after trailing silence; PTT audio ends the instant the button is let go).
+    // After EVERY feed, drain every processed chunk that is ready: feed and
+    // fetch chunk sizes can differ, so a 1:1 feed/fetch pairing starves the
+    // pipeline ("Ringbuffer of AFE is empty") and fragments what MultiNet sees.
+    const size_t tail = SAMPLE_RATE * 8 / 10;
     const size_t total = samples + tail;
-    int found_id = -1; float found_prob = 0.0f; bool done = false;
-    for (size_t pos = 0; pos < total && !done; pos += feed_n) {
-        for (int k = 0; k < feed_n; ++k) {
-            size_t s = pos + k;
-            in[k] = (s < samples) ? audio[s] : 0;
+    int found_id = -1; float found_prob = 0.0f;
+    int fetched = 0; const char* why = "no-result";
+    bool done = false;
+    size_t pos = 0;
+    int idle_drains = 0;
+    while (!done) {
+        if (pos < total) {
+            for (int k = 0; k < feed_n; ++k) {
+                size_t s = pos + k;
+                in[k] = (s < samples) ? audio[s] : 0;
+            }
+            afe->feed(afe_data, in);
+            pos += feed_n;
         }
-        if (afe->feed(afe_data, in) < 0) continue;
-        afe_fetch_result_t* r = afe->fetch_with_delay(afe_data, 50 / portTICK_PERIOD_MS);
-        if (!r || r->ret_value != ESP_OK || !r->data) continue;
-        esp_mn_state_t st = mn->detect(mn_data, r->data);
-        if (st == ESP_MN_STATE_DETECTED) {
-            esp_mn_results_t* res = mn->get_results(mn_data);
-            if (res && res->num > 0) { found_id = res->command_id[0]; found_prob = res->prob[0]; }
-            done = true;
-        } else if (st == ESP_MN_STATE_TIMEOUT) done = true;
+        bool got_any = false;
+        for (;;) {
+            afe_fetch_result_t* r = afe->fetch_with_delay(afe_data, pos < total ? 0 : 20 / portTICK_PERIOD_MS);
+            if (!r || r->ret_value != ESP_OK || !r->data) break;
+            got_any = true; ++fetched;
+            esp_mn_state_t st = mn->detect(mn_data, r->data);
+            if (st == ESP_MN_STATE_DETECTED) {
+                esp_mn_results_t* res = mn->get_results(mn_data);
+                if (res && res->num > 0) { found_id = res->command_id[0]; found_prob = res->prob[0]; }
+                why = "detected"; done = true; break;
+            }
+            if (st == ESP_MN_STATE_TIMEOUT) { why = "mn-timeout"; done = true; break; }
+        }
+        if (pos >= total && !got_any && ++idle_drains > 3) done = true;   // pipeline drained
     }
     heap_caps_free(in);
-    Serial.printf("FOX: MultiNet id=%d prob=%.2f\n", found_id, found_prob);
+    Serial.printf("FOX: MultiNet id=%d prob=%.2f (%s, chunks feed=%d fetch=%d fetched=%d)\n",
+                  found_id, found_prob, why, feed_n, fetch_n, fetched);
     if (found_id < 0) return -1;
     float need = (found_id >= 60) ? MIN_TOPIC_PROB : MIN_COMMAND_PROB;
     return (found_prob >= need) ? found_id : -1;
@@ -681,6 +701,12 @@ static void process_utterance(int16_t* audio, size_t n) {
         speak("i'll remember this moment~");
         return;
     }
+    {   // diagnostics: is the captured speech real audio?
+        int32_t peak = 0; uint64_t sum = 0;
+        for (size_t i = 0; i < n; ++i) { int32_t v = abs(audio[i]); sum += v; if (v > peak) peak = v; }
+        Serial.printf("FOX: heard %ums  peak=%d  avg=%u\n",
+                      (unsigned)(n * 1000ULL / SAMPLE_RATE), (int)peak, (unsigned)(n ? sum / n : 0));
+    }
     // Offline command grammar first (needs model partition + MultiNet).
     int id = speech_ready ? recognize_offline(audio, n) : -1;
     if (id >= 0) {
@@ -708,22 +734,27 @@ static void process_utterance(int16_t* audio, size_t n) {
 #include "fox_audio.h"
 #include <Wire.h>
 
-// AtomS3R backlight = LP5562 @ 0x30 on the internal I2C bus (SDA=45, SCL=0) —
-// the SAME bus M5Unified already owns for the BMI270 IMU. Write it through
-// M5.In_I2C (M5's own driver) instead of re-initialising Wire1 on those pins,
-// which put two I2C drivers on one controller. M5GFX's AtomS3R light class also
-// drives this chip via setBrightness(); this is belt-and-braces.
+// AtomS3R backlight = LP5562 @ 0x30 on system I2C (SDA=45, SCL=0).
+// Use Wire1 so Atomic Echo Base can keep Wire on 38/39 for ES8311.
 static void fox_backlight(uint8_t brightness) {
-    if (!M5.In_I2C.isEnabled()) return;
-    const uint32_t f = 400000;
-    if (!M5.In_I2C.writeRegister8(0x30, 0x00, 0x40, f)) {   // ENABLE
-        Serial.println("FOX: LP5562 no ACK (M5GFX light handles backlight)");
+    Wire1.end();
+    Wire1.begin(45, 0, 400000);
+    delay(1);
+    auto wr = [](uint8_t reg, uint8_t val) -> bool {
+        Wire1.beginTransmission(0x30);
+        Wire1.write(reg);
+        Wire1.write(val);
+        return Wire1.endTransmission() == 0;
+    };
+    if (!wr(0x00, 0x40)) {
+        Serial.println("FOX: LP5562 no ACK on Wire1");
         return;
     }
     delay(1);
-    M5.In_I2C.writeRegister8(0x30, 0x08, 0x01, f);          // CONFIG: internal clk
-    M5.In_I2C.writeRegister8(0x30, 0x70, 0x00, f);          // LED_MAP: direct PWM
-    M5.In_I2C.writeRegister8(0x30, 0x0E, brightness, f);    // B_PWM = backlight
+    wr(0x08, 0x01);
+    wr(0x70, 0x00);
+    wr(0x0E, brightness);
+    Serial.printf("FOX: LP5562 backlight %u\n", brightness);
 }
 
 static uint32_t last_activity = 0;
@@ -767,6 +798,8 @@ void setup() {
     if (!audio_begin(cfg.volume)) {
         M5.Display.drawString("audio fail", 64, 90);
         Serial.println("FOX: audio begin failed — continuing without sound");
+    } else {
+        fox_backlight(200);  // Wire1 only — safe after Echo owns Wire (v8, known-good)
     }
 
     setenv("TZ", cfg.timezone.c_str(), 1); tzset();
@@ -858,20 +891,20 @@ void loop() {
     if (g == GST_SHAKE) { needs_interact(needs, true);  speak("wheee!"); last_activity = now; }
 
     // --- Idle chatter (fidgety companion) ---------------------------------
-    if (now - last_activity > 20000 && now - last_idle_chatter > 25000) {
+    if (now - last_activity > 20000 && now - last_idle_chatter > 45000) {
         FoxMood m = fox_mood(needs);
-        // Markov-generated line for variety; caption shows the words, and we
-        // babble the syllables (never fake spoken words the voice didn't say).
+        // Markov-generated line for variety. The fox has a real voice now, so
+        // it SAYS the line (caption = exactly the words spoken).
         String line = fox_markov_line(m);
         face_caption(line);
-        voice_babble(m, 2 + (esp_random() % 3));
-        last_idle_chatter = now;
+        voice_say(line, m);
+        last_idle_chatter = millis();
     }
 
     // --- Pwnagotchi-style RF mood: the radios colour the fox's feelings -----
     if (cfg.wifi_enabled) {
         String rf = rf_mood_tick();   // self-throttled to ~once per 45s
-        if (rf.length()) { face_caption(rf); voice_babble(fox_mood(needs), 3); }
+        if (rf.length()) { face_caption(rf); voice_say(rf, fox_mood(needs)); }
     }
 
     // --- Sleep when idle a long time --------------------------------------

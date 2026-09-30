@@ -247,14 +247,16 @@ void voice_say(const String& raw, FoxMood mood) {
 #if HAVE_PICO
         spoke = pico_say(text);
 #endif
-        if (!spoke) spoke = sam_say(text);
+        if (spoke) Serial.println("FOX: voice=picotts");
+        if (!spoke) { spoke = sam_say(text); if (spoke) Serial.println("FOX: voice=sam (fallback)"); }
     } else if (g_cfg.voice_pack == "critter") {
         spoke = sam_say(text);
     } else {
         spoke = sam_say(text);
     }
     if (!spoke) {
-        Serial.println("FOX: TTS failed — babble fallback only");
+        Serial.printf("FOX: voice=BABBLE — pico+sam both failed (echo=%d, free psram=%uKB)\n",
+                      (int)g_echo_ok, (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
         voice_babble(mood, syllable_estimate(text));
     }
 }

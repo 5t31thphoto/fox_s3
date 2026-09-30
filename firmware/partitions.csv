@@ -1,13 +1,14 @@
-# 8MB AtomS3R layout. PicoTTS language resources live outside the app so the
-# factory image does not consume their ~1.4MB. Brain B is intentionally compact
-# but remains larger than Brain A. All offsets are fixed and end below 0x800000.
+# 8MB AtomS3R layout. Every region sized from measured artifacts:
+#   app ~2.57MB (boot log)  -> factory 3.0MB
+#   srmodels (MultiNet7 en) ~2.76MB -> model 2.875MB
+#   PicoTTS en-US: README maxima TA 640K / SG 820K
 # Name,       Type, SubType,  Offset,    Size
 nvs,          data, nvs,      0x009000,  0x006000,
 otadata,      data, ota,      0x00f000,  0x002000,
 phy_init,     data, phy,      0x011000,  0x001000,
-factory,      app,  factory,  0x020000,  0x360000,
-model,        data, spiffs,   0x380000,  0x2a0000,
-picotts_ta,   data, undefined,0x620000,  0x0a0000,
-picotts_sg,   data, undefined,0x6c0000,  0x0c0000,
-foxbrain,     data, 0x45,     0x780000,  0x072000,
-foxfs,        data, spiffs,   0x7f2000,  0x00004000,
+factory,      app,  factory,  0x020000,  0x300000,
+model,        data, spiffs,   0x320000,  0x2e0000,
+picotts_ta,   data, undefined,0x600000,  0x0a0000,
+picotts_sg,   data, undefined,0x6a0000,  0x0d0000,
+foxbrain,     data, 0x45,     0x770000,  0x080000,
+foxfs,        data, spiffs,   0x7f0000,  0x010000,

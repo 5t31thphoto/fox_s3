@@ -344,42 +344,106 @@
     sw.appendChild(d);
   });
 
-  // ---- USB serial config ----
-  let port=null, writer=null;
+  // ---- USB serial link to the fox (config + handshake) ----
+  // One robust routine used by BOTH the first-flash auto-apply and the manual
+  // "Send to fox" button:
+  //   1. find the fox's port (already-granted Espressif USB device, else ask)
+  //   2. ping "FOX?" until the fox answers FOX_READY; if it doesn't answer,
+  //      hard-reset it into the app (it can be left in download mode after a
+  //      flash) and reconnect after the USB re-enumerates
+  //   3. send the config JSON line and wait for FOX_CONFIG_OK / FOX_CONFIG_ERR,
+  //      retrying, and say exactly what happened.
   const status=document.getElementById('status');
   const echo=document.getElementById('echo');
+  const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+  let link=null;   // {port, reader, writer, lines:[], waiters:[]}
 
-  async function connect(){
-    if(!('serial' in navigator)){ status.innerHTML='<span class="warn">Web Serial needs Chrome/Edge desktop.</span>'; return false; }
-    try{
-      port = await navigator.serial.requestPort();
-      await port.open({baudRate:115200});
-      writer = port.writable.getWriter();
-      readLoop();
-      status.innerHTML='<span class="ok">connected ✓</span>';
-      return true;
-    }catch(e){ status.innerHTML='<span class="warn">'+e.message+'</span>'; return false; }
+  async function closeLink(){
+    if(!link) return;
+    const L=link; link=null;
+    try{ await L.reader.cancel(); }catch(e){}
+    try{ L.reader.releaseLock(); }catch(e){}
+    try{ L.writer.releaseLock(); }catch(e){}
+    try{ await L.port.close(); }catch(e){}
   }
-
-  async function readLoop(){
-    const dec=new TextDecoderStream();
-    port.readable.pipeTo(dec.writable);
-    const reader=dec.readable.getReader();
-    let buf='';
-    for(;;){
-      const {value,done}=await reader.read();
-      if(done) break;
-      buf+=value;
-      let nl;
-      while((nl=buf.indexOf('\n'))>=0){
-        const line=buf.slice(0,nl).trim(); buf=buf.slice(nl+1);
-        if(line.indexOf('FOX_CONFIG_OK')>=0){ echo.innerHTML='<span class="ok">Your fox has its new identity. Say hi! 🦊</span>'; }
-        else if(line) echo.textContent = line;
+  async function pickPort(ask){
+    if(!('serial' in navigator)){ status.innerHTML='<span class="warn">Web Serial needs Chrome/Edge desktop.</span>'; return null; }
+    const ports=await navigator.serial.getPorts();
+    const esp=ports.filter(p=>{ const i=p.getInfo?p.getInfo():{}; return i.usbVendorId===0x303a; });
+    if(esp.length) return esp[esp.length-1];
+    if(ports.length && !ask) return ports[ports.length-1];
+    if(!ask) return null;
+    try{ return await navigator.serial.requestPort({filters:[{usbVendorId:0x303a}]}); }
+    catch(e){ status.innerHTML='<span class="warn">'+e.message+'</span>'; return null; }
+  }
+  async function openLink(port){
+    await closeLink();
+    await port.open({baudRate:115200});
+    const L={port, lines:[], writer:port.writable.getWriter(), reader:null};
+    const dec=new TextDecoder(); L.reader=port.readable.getReader();
+    link=L;
+    (async()=>{ let buf='';
+      try{ for(;;){ const {value,done}=await L.reader.read(); if(done) break;
+        buf+=dec.decode(value,{stream:true}); let nl;
+        while((nl=buf.indexOf('\n'))>=0){ const line=buf.slice(0,nl).trim(); buf=buf.slice(nl+1);
+          if(line){ L.lines.push(line); if(L.lines.length>200) L.lines.shift(); } } } }
+      catch(e){} })();
+    return L;
+  }
+  async function send(line){ await link.writer.write(new TextEncoder().encode(line+'\n')); }
+  async function waitFor(pred, ms){
+    const t0=Date.now();
+    while(Date.now()-t0<ms){ if(!link) return null;
+      const i=link.lines.findIndex(pred); if(i>=0){ return link.lines.splice(0,i+1)[i]; }
+      await sleep(60); }
+    return null;
+  }
+  async function pingFox(ms){
+    const t0=Date.now();
+    while(Date.now()-t0<ms){ try{ await send('FOX?'); }catch(e){ return false; }
+      if(await waitFor(l=>l.indexOf('FOX_READY')>=0, 1000)) return true; }
+    return false;
+  }
+  async function resetIntoApp(){
+    // USB-Serial/JTAG: DTR=boot pin, RTS=reset. DTR low + RTS pulse = normal boot.
+    try{ await link.port.setSignals({dataTerminalReady:false, requestToSend:true});
+         await sleep(120);
+         await link.port.setSignals({dataTerminalReady:false, requestToSend:false}); }catch(e){}
+    await closeLink();                      // the device re-enumerates on reset
+    for(let i=0;i<40;i++){ await sleep(250);
+      const p=await pickPort(false); if(!p) continue;
+      try{ await openLink(p); return true; }catch(e){} }
+    return false;
+  }
+  async function connectFox(ask){
+    const p=await pickPort(ask); if(!p) return false;
+    try{ await openLink(p); }catch(e){ status.innerHTML='<span class="warn">port busy: close the Logs window, then retry</span>'; return false; }
+    status.textContent='connected — waiting for the fox…';
+    if(await pingFox(4000)) return true;
+    status.textContent='fox not answering — resetting it into the app…';
+    if(!(await resetIntoApp())) return false;
+    return await pingFox(30000);           // boot + speech model load
+  }
+  async function applyConfig(ask){
+    echo.textContent='';
+    if(!(await connectFox(ask))){ status.innerHTML='<span class="warn">Could not reach the fox. Unplug/replug it, then press Send to fox.</span>'; return false; }
+    const json=JSON.stringify(buildConfig());
+    for(let attempt=1; attempt<=3; attempt++){
+      status.textContent='sending settings (try '+attempt+')…';
+      await send(json);
+      const r=await waitFor(l=>l.indexOf('FOX_CONFIG_OK')>=0||l.indexOf('FOX_CONFIG_ERR')>=0, 8000);
+      if(r && r.indexOf('FOX_CONFIG_OK')>=0){
+        status.innerHTML='<span class="ok">saved on the fox ✓</span>';
+        echo.innerHTML='<span class="ok">Your fox has its new identity. Say hi! 🦊</span>';
+        return true;
       }
+      if(r) echo.textContent='fox reported a config error — retrying…';
+      await pingFox(4000);
     }
+    status.innerHTML='<span class="warn">The fox never confirmed the settings.</span>';
+    return false;
   }
-
-  document.getElementById('reconnect').onclick=connect;
+  document.getElementById('reconnect').onclick=()=>connectFox(true).then(ok=>{ if(ok) status.innerHTML='<span class="ok">fox connected ✓</span>'; });
 
   // ---- in-browser SAM voice preview (sam-js) ----
   let SamMod=null;
@@ -404,7 +468,7 @@
       ssid:val('ssid'), pass:val('pass'), weather:val('weather'),
       key:val('key'), chat_model:val('cmodel'), api_base:val('abase'),
       mode:document.getElementById('mode').value,
-      voice: pack==='A' ? 'chatterbox' : 'chatterbox',
+      voice: pack==='A' ? 'chatterbox' : 'critter',
       volume:parseInt(val('volume'),10),
       voice_speed:+document.getElementById('vspeed').value,
       voice_pitch:+document.getElementById('vpitch').value,
@@ -424,33 +488,28 @@
               document.getElementById('splash').value.trim() || val('pers'));
   }
 
-  // ---- FIRST-FLASH: auto-apply settings right after flashing, reusing the port
-  // esp-web-tools already opened (no separate USB step). Blank form => plain flash.
-  flashBtn.addEventListener('state-changed', async (e)=>{
-    if(!(e.detail && e.detail.state==='FINISHED')) return;
-    if(!configFilled()){ echo.textContent='flashed! (no settings entered — plain flash)'; return; }
-    echo.textContent='flashed! applying your settings…';
-    await new Promise(r=>setTimeout(r,5000));           // let the fox reboot
-    try{
-      const ports=await navigator.serial.getPorts();    // already granted, no picker
-      if(!ports.length){ echo.textContent='flashed! use Step 2 to send settings.'; return; }
-      const pt=ports[0];
-      if(!pt.readable) await pt.open({baudRate:115200});
-      const w=pt.writable.getWriter();
-      await w.write(new TextEncoder().encode(JSON.stringify(buildConfig())+'\n'));
-      w.releaseLock();
-      echo.innerHTML='<span class="ok">flashed &amp; personalized — say hi to your fox! 🦊</span>';
-    }catch(err){ echo.textContent='flashed! (auto-send failed — use Step 2)'; }
-  });
+  // ---- FIRST-FLASH: apply the form automatically once flashing completes ----
+  // esp-web-tools shows its install dialog as an element on <body>. When a
+  // flash has run and that dialog closes, the port is free: if any settings
+  // were entered, push them to the fox. Blank form => plain flash, nothing sent.
+  let flashRan=false, applying=false;
+  flashBtn.addEventListener('state-changed', e=>{ if(e.detail && e.detail.state) flashRan=true; });
+  new MutationObserver(async (muts)=>{
+    for(const m of muts){
+      for(const n of m.addedNodes){ if(n.tagName==='EWT-INSTALL-DIALOG') flashRan=true; }
+      for(const n of m.removedNodes){
+        if(n.tagName!=='EWT-INSTALL-DIALOG' || !flashRan || applying) continue;
+        flashRan=false;
+        if(!configFilled()){ echo.textContent='flashed! (no settings entered — plain flash)'; continue; }
+        applying=true; echo.textContent='flashed! handing your settings to the fox…';
+        await sleep(1500);
+        await applyConfig(false);
+        applying=false;
+      }
+    }
+  }).observe(document.body,{childList:true});
 
-  document.getElementById('send').onclick=async()=>{
-    if(!writer && !(await connect())) return;
-    const cfg=buildConfig();
-    const line=JSON.stringify(cfg)+'\n';
-    await writer.write(new TextEncoder().encode(line));
-    status.innerHTML='<span class="ok">sent ✓</span>';
-    echo.textContent='…sending config over USB serial (wait for FOX_CONFIG_OK)…';
-  };
+  document.getElementById('send').onclick=()=>applyConfig(true);
 
   const val=id=>document.getElementById(id).value.trim();
 </script>

@@ -3,6 +3,15 @@
 #pragma once
 #include <Arduino.h>
 #include <M5Unified.h>
+#include <esp_heap_caps.h>
+
+// Large buffers: prefer PSRAM, fall back to internal RAM. Never use a bare
+// MALLOC_CAP_SPIRAM allocation — if PSRAM is unavailable it returns NULL and the
+// feature silently dies (that is exactly how SAM, puppet mode and PTT broke).
+static inline void* fox_alloc(size_t n) {
+    void* p = heap_caps_malloc(n, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    return p ? p : heap_caps_malloc(n, MALLOC_CAP_8BIT);
+}
 
 // ---- hardware ---------------------------------------------------------------
 static constexpr gpio_num_t USER_GPIO   = GPIO_NUM_41;  // AtomS3R USER button, active-low
@@ -19,7 +28,8 @@ static constexpr uint32_t IDLE_SLEEP_MS        = 120000;  // light-sleep after 2
 static constexpr uint32_t CONVERSATION_TIMEOUT = 45000;   // conversation mode silence timeout
 static constexpr uint32_t PTT_MIN_MS           = 200;     // shorter press = open menu
 static constexpr uint32_t PTT_MAX_MS           = 10000;   // hard cap on one utterance
-static constexpr float    MIN_COMMAND_PROB     = 0.55f;   // MultiNet acceptance threshold
+static constexpr float    MIN_COMMAND_PROB     = 0.40f;   // MultiNet: actions (logged, tunable)
+static constexpr float    MIN_TOPIC_PROB       = 0.30f;   // MultiNet: conversation topics
 
 // ---- personality / memory ---------------------------------------------------
 static constexpr size_t   MEM_MAX_BYTES = 6000;   // rolling journal cap (kept in a file)
@@ -68,7 +78,6 @@ struct FoxConfig {
     // Per-tool enables (from the original config_store schema).
     bool   tool_ble      = true;
     bool   tool_wifi     = true;
-    bool   tool_ir       = true;
     bool   tool_imu      = true;
     bool   tool_context  = true;
     bool   lip_sync      = true;   // drive the mouth from mic FFT while listening

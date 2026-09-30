@@ -64,8 +64,7 @@ static void resolve_weights() {
     W.rms_att   = c.f32((size_t)L * dim);
     W.rms_ffn   = c.f32((size_t)L * dim);
     W.rms_final = c.f32(dim);
-    auto arr = [&](int n) { return (QTensor*)heap_caps_malloc(n * sizeof(QTensor),
-                                     MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT); };
+    auto arr = [&](int n) { return (QTensor*)fox_alloc(n * sizeof(QTensor)); };
     W.wq = arr(L); W.wk = arr(L); W.wv = arr(L); W.wo = arr(L);
     W.w1 = arr(L); W.w2 = arr(L); W.w3 = arr(L);
     for (int l = 0; l < L; ++l) W.wq[l] = c.q8(dim, dim, gs);
@@ -79,8 +78,8 @@ static void resolve_weights() {
     else { W.wcls.q = nullptr; W.wcls.s = nullptr; }
     // vocab blob follows; parse into V
     const uint8_t* vp = c.p;
-    const char** toks = (const char**)heap_caps_malloc(512 * sizeof(char*), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    float* scores = (float*)heap_caps_malloc(512 * sizeof(float), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    const char** toks = (const char**)fox_alloc(512 * sizeof(char*));
+    float* scores = (float*)fox_alloc(512 * sizeof(float));
     if (!toks || !scores) { if (toks) free(toks); if (scores) free(scores); return; }
     int vs = h.vocab > 512 ? 512 : h.vocab;
     for (int i = 0; i < vs; ++i) {

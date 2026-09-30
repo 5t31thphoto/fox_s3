@@ -1,50 +1,57 @@
-# Use the project's 8MB custom partition table. Without these settings,
-# ESP-IDF silently falls back to its default 1MB factory partition, which
-# cannot contain fox.bin (~3MB).
+# ---- Flash / partitions -------------------------------------------------------
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
 CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
 
-# PicoTTS is kept out of fox.bin. Its English-US TA/SG resources are flashed
-# into the dedicated picotts_ta/picotts_sg partitions by the component build.
-# If PicoTTS cannot be acquired in CI, the local SAM voice remains available.
+# ---- PSRAM: AtomS3R = ESP32-S3-PICO-1-N8R8, 8MB OCTAL PSRAM -------------------
+# Without this the chip boots with ~230KB of RAM total. PicoTTS (~1.1MB), the
+# esp-sr AFE/MultiNet, SAM's render buffer, the PTT capture buffer and the FFT
+# all need PSRAM. (The previous config never enabled it — boot log showed no
+# "esp_psram: Found 8MB" line and PicoTTS reported insufficient memory.)
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=8192
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+
+# ---- Tasks / CPU -------------------------------------------------------------
+# setup()/loop() run on the main task (see app_main in fox_main.cpp). The IDF
+# default main stack is 3584 bytes — far too small; overflow silently corrupts
+# the heap. 32KB matches the Arduino loop task.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=32768
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+CONFIG_FREERTOS_HZ=1000
+# PicoTTS/AFE legitimately keep core 1 busy for long stretches; don't let the
+# idle-task watchdog on core 1 cry wolf about it.
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=n
+
+# ---- Offline speech (esp-sr) -------------------------------------------------
+# esp-sr's defaults are NO English and NO Chinese MultiNet model, so srmodels.bin
+# contained no command model at all. Select English MultiNet7; no wake word
+# (the fox is push-to-talk). Model is read from the "model" flash partition.
+CONFIG_SR_MN_CN_NONE=y
+CONFIG_SR_MN_EN_MULTINET7_QUANT=y
+
+# ---- PicoTTS: en-US, resources in their own partitions ------------------------
 CONFIG_PICOTTS_LANGUAGE_EN_US=y
 CONFIG_PICOTTS_RESOURCE_MODE_PARTITION=y
 CONFIG_PICOTTS_TA_PARTITION="picotts_ta"
 CONFIG_PICOTTS_SG_PARTITION="picotts_sg"
 
-CONFIG_FREERTOS_HZ=1000
-
-# BLE scanning: Arduino-ESP32 BLE API is backed by NimBLE in this IDF app.
-# Keep Bluetooth enabled as BLE-only; Fox uses observer/scanner functionality.
+# ---- Bluetooth: NimBLE, observer (radar) ------------------------------------
 CONFIG_BT_ENABLED=y
 CONFIG_BT_BLUEDROID_ENABLED=n
 CONFIG_BT_NIMBLE_ENABLED=y
 CONFIG_BT_CONTROLLER_ENABLED=y
-CONFIG_BT_CONTROLLER_ONLY=n
 CONFIG_BT_NIMBLE_ROLE_OBSERVER=y
 CONFIG_MBEDTLS_PSK_MODES=y
 CONFIG_MBEDTLS_KEY_EXCHANGE_PSK=y
-
-# WiFi/BT software coexistence — REQUIRED because the NimBLE controller stays up
-# for the life of the fox, so the WiFi/BLE radar tools contend for the radio.
-# Without these, WiFi STA (AP radar) or BLE scan silently fails to init -> the
-# radar sees nothing. (This was missing; it's why WiFi/BLE "don't initialize".)
+# WiFi + BLE share the radio; the radar tools use both.
 CONFIG_ESP_COEX_SW_COEXIST_ENABLE=y
 CONFIG_ESP_WIFI_SW_COEXIST_ENABLE=y
 
-# PicoTTS needs ~1MB of working RAM. Route large mallocs to PSRAM so its lingware
-# tables don't OOM internal SRAM. (PSRAM is already enabled for the AtomS3R.)
-CONFIG_SPIRAM_USE_MALLOC=y
-CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096
-CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
-
-# Put Serial AND the console on the ONE bidirectional USB-Serial-JTAG interface.
-# The device was enumerating as "esp32" (TinyUSB CDC) for Arduino Serial while
-# the boot log went to the JTAG console — two different USB endpoints — so the
-# web flasher's config write never reached input_poll() and FOX_CONFIG_OK never
-# came back. HWCDC (mode 1) + JTAG console = one port the browser reads & writes.
-CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
-CONFIG_ARDUINO_USB_MODE=1
-CONFIG_ARDUINO_USB_CDC_ON_BOOT=1
+# NOTE: Arduino's `Serial` -> USB (HW CDC) is NOT a Kconfig option. It is set by
+# the ARDUINO_USB_MODE / ARDUINO_USB_CDC_ON_BOOT compile definitions in the
+# project CMakeLists.txt (Espressif's hw_cdc_hello_world pattern).

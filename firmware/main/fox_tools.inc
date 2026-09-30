@@ -72,9 +72,9 @@ static int radar_n = 0;
 
 static void radar_alloc() {
     if (radar_sources) return;
-    radar_sources = (RadarSource*)heap_caps_calloc(RADAR_SOURCES, sizeof(RadarSource),
-                                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    radar_sources = (RadarSource*)fox_alloc(RADAR_SOURCES * sizeof(RadarSource));
     if (!radar_sources) return;
+    memset(radar_sources, 0, RADAR_SOURCES * sizeof(RadarSource));
     for (int i = 0; i < RADAR_SOURCES; ++i)
         for (int b = 0; b < RADAR_BINS; ++b) radar_sources[i].rssi[b] = -127;
 }

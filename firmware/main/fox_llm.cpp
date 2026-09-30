@@ -83,8 +83,7 @@ bool load_model() {
 
     // Allocate runtime state in PSRAM.
     auto alloc = [](int n) {
-        return (float*)heap_caps_malloc(n * sizeof(float),
-                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        return (float*)fox_alloc(n * sizeof(float));
     };
     int dim = M.h.dim, hidden = M.h.hidden, seq = M.h.seq_len,
         layers = M.h.n_layers, kvdim = (M.h.dim * M.h.n_kv_heads) / M.h.n_heads;

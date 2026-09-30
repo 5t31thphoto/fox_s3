@@ -28,7 +28,6 @@
 #include <esp_sleep.h>
 #include <esp_heap_caps.h>
 #include <esp_partition.h>
-#include <driver/rmt_tx.h>
 #include <math.h>
 
 // esp-sr (offline speech)
@@ -75,7 +74,6 @@ static void load_config() {
     cfg.weights_url = prefs.getString("wurl", cfg.weights_url);
     cfg.tool_ble    = prefs.getBool("tble", cfg.tool_ble);
     cfg.tool_wifi   = prefs.getBool("twifi", cfg.tool_wifi);
-    cfg.tool_ir     = prefs.getBool("tir", cfg.tool_ir);
     cfg.tool_imu    = prefs.getBool("timu", cfg.tool_imu);
     cfg.lip_sync    = prefs.getBool("lips", cfg.lip_sync);
     cfg.volume      = prefs.getUChar("vol", cfg.volume);
@@ -111,7 +109,6 @@ void save_config() {
     prefs.putString("wurl", cfg.weights_url);
     prefs.putBool("tble", cfg.tool_ble);
     prefs.putBool("twifi", cfg.tool_wifi);
-    prefs.putBool("tir", cfg.tool_ir);
     prefs.putBool("timu", cfg.tool_imu);
     prefs.putBool("lips", cfg.lip_sync);
     prefs.putUChar("vol", cfg.volume);
@@ -132,36 +129,54 @@ void save_config() {
 //  correct here — with bug #1 fixed in recognize_offline().
 // ============================================================================
 struct Command { int id; const char* phrases; const char* action; };
-// Keep phrases short and phonetically distinct. IDs are 1-based.
+// Phrases for one id are separated by ';' — init_speech() registers EACH phrase
+// separately (MultiNet rejects a single string containing ';'). Lowercase
+// letters and spaces only. IDs < 60 are commands; 60+ are conversation topics.
 static const Command COMMANDS[] = {
-    {1,  "hello fox;hey fox;hi fox",             "greet"},
-    {2,  "what time is it;tell me the time",      "time"},
-    {3,  "how are you;how do you feel",           "mood"},
-    {4,  "what is the weather;weather",           "weather"},
-    {5,  "turn off the tv;power off tv",          "ir_tv_power"},
-    {6,  "volume up",                              "vol_up"},
-    {7,  "volume down",                            "vol_dn"},
-    {8,  "go to sleep;good night",                 "sleep"},
-    {9,  "conversation mode;lets chat",            "conv_on"},
-    {10, "remember this",                          "remember"},
-    {11, "what do you remember",                   "recall"},
-    {12, "open the menu;show menu",                "menu"},
-    // voice-launchable tools & games (the fox runs them for you)
-    {13, "scan for devices;bluetooth radar",       "ble_radar"},
-    {14, "scan wifi;wifi radar",                    "wifi_radar"},
-    {15, "sniff packets;sniffer mode",              "sniffer"},
-    {16, "play wormhole;fly the ship",              "wormhole"},
-    {17, "catch the treats;catch game",             "catch"},
-    {18, "twenty questions;guess my thing",         "twentyq"},
-    {19, "space weather;solar storm",               "space"},
-    {20, "any aurora;northern lights",              "aurora"},
-    {21, "lip sync mode;puppet mode",               "lipsync"},
-    {23, "hunt mode;pwnagotchi",                     "sniffer"},
-    {24, "explore the maze;lets explore",           "maze"},
-    {25, "play with me;lets hang out",              "encounter"},
-    {26, "show me colors;pretty lights",            "plasma"},
-    {27, "starfield;fly through space",             "starfield"},
-    {28, "what are phones looking for;probe scan",  "probes"},
+    {1,  "hello fox;hey fox;hi fox;hello;hi there",           "greet"},
+    {2,  "what time is it;tell me the time;what is the time", "time"},
+    {3,  "how are you;how do you feel;are you okay",          "mood"},
+    {4,  "what is the weather;weather report;is it raining",  "weather"},
+    {6,  "volume up;louder;speak up",                         "vol_up"},
+    {7,  "volume down;quieter;be quiet",                      "vol_dn"},
+    {8,  "go to sleep;good night;time for bed",               "sleep"},
+    {9,  "conversation mode;lets chat;talk with me",          "conv_on"},
+    {10, "remember this;remember that",                       "remember"},
+    {11, "what do you remember;tell me a memory",             "recall"},
+    {12, "open the menu;show menu;show me the menu",          "menu"},
+    {13, "scan for devices;bluetooth radar;find bluetooth",   "ble_radar"},
+    {14, "scan wifi;wifi radar;find wifi",                    "wifi_radar"},
+    {15, "sniff packets;sniffer mode;hunt mode",              "sniffer"},
+    {16, "play wormhole;fly the ship",                        "wormhole"},
+    {17, "catch the treats;catch game",                       "catch"},
+    {18, "twenty questions;guess my thing",                   "twentyq"},
+    {19, "space weather;solar storm",                         "space"},
+    {20, "any aurora;northern lights",                        "aurora"},
+    {21, "lip sync mode;puppet mode",                         "lipsync"},
+    {24, "explore the maze;lets explore",                     "maze"},
+    {25, "play with me;lets hang out;lets play",              "encounter"},
+    {26, "show me colors;pretty lights",                      "plasma"},
+    {27, "starfield;fly through space",                       "starfield"},
+    {28, "what are phones looking for;probe scan",            "probes"},
+    {29, "reaction test;test my reflexes",                    "reaction"},
+    {30, "pet the fox;can i pet you",                         "pet"},
+    {31, "are you hungry;want a snack;feed the fox",          "feed"},
+    // ---- conversation topics: recognising ONE of these makes the fox feel
+    //      like it understood; the reply is picked per topic + mood ----------
+    {60, "i love you;love you fox;you are cute;good girl",    "t_love"},
+    {61, "i am sad;i feel sad;bad day;i am upset",            "t_sad"},
+    {62, "i am happy;good day;i feel great",                  "t_happy"},
+    {63, "i am tired;so tired;i am sleepy",                   "t_tired"},
+    {64, "tell me a joke;make me laugh;say something funny",  "t_joke"},
+    {65, "thank you;thanks fox;thanks",                       "t_thanks"},
+    {66, "sorry;i am sorry",                                  "t_sorry"},
+    {67, "good morning;morning fox",                          "t_morning"},
+    {68, "goodbye;see you later;bye fox",                     "t_bye"},
+    {69, "what is your name;who are you",                     "t_name"},
+    {70, "i am bored;so bored;nothing to do",                 "t_bored"},
+    {71, "good job;well done;you are smart",                  "t_praise"},
+    {72, "what are you doing;what are you up to",             "t_doing"},
+    {73, "do you like me;are we friends",                     "t_friend"},
 };
 static const size_t COMMAND_COUNT = sizeof(COMMANDS) / sizeof(COMMANDS[0]);
 
@@ -240,9 +255,20 @@ static bool init_speech() {
     if (esp_mn_commands_alloc((esp_mn_iface_t*)mn, (model_iface_data_t*)mn_data) != ESP_OK)
         return false;
     esp_mn_commands_clear();
-    for (size_t i = 0; i < COMMAND_COUNT; ++i)
-        esp_mn_commands_add(COMMANDS[i].id, (char*)COMMANDS[i].phrases);
+    int added = 0, rejected = 0;
+    for (size_t i = 0; i < COMMAND_COUNT; ++i) {
+        const char* p = COMMANDS[i].phrases;
+        while (*p) {
+            char ph[64]; size_t k = 0;
+            while (*p && *p != ';' && k < sizeof(ph) - 1) ph[k++] = *p++;
+            ph[k] = 0; if (*p == ';') ++p;
+            if (!k) continue;
+            if (esp_mn_commands_add(COMMANDS[i].id, ph) == ESP_OK) ++added;
+            else { ++rejected; Serial.printf("FOX: MultiNet rejected '%s'\n", ph); }
+        }
+    }
     esp_mn_commands_update();
+    Serial.printf("FOX: MultiNet phrases added=%d rejected=%d\n", added, rejected);
     mn->print_active_speech_commands(mn_data);
     if (afe->get_fetch_chunksize(afe_data) != mn->get_samp_chunksize(mn_data)) {
         Serial.println("FOX: AFE/MultiNet frame mismatch"); return false;
@@ -254,37 +280,36 @@ static bool init_speech() {
 static int recognize_offline(int16_t* audio, size_t samples) {
     if (!speech_ready || !audio || samples < SAMPLE_RATE / 4) return -1;
     const int feed_n = afe->get_feed_chunksize(afe_data);
-    if (feed_n != afe->get_fetch_chunksize(afe_data)) return -1;
     afe->reset_buffer(afe_data);
-    int16_t* in = (int16_t*)heap_caps_malloc(feed_n * sizeof(int16_t),
-                                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    mn->clean(mn_data);                          // no state left from last turn
+    int16_t* in = (int16_t*)fox_alloc(feed_n * sizeof(int16_t));
     if (!in) return -1;
-    int found_id = -1;
-    float found_prob = 0.0f;
-    // FIX (bug #1): the old loop condition was `pos < samples && !found_id`.
-    // found_id starts at -1, and !(-1) is false, so the body never ran and
-    // offline recognition ALWAYS failed. Use an explicit found flag instead.
-    bool found = false;
-    for (size_t pos = 0; pos < samples && !found; pos += feed_n) {
-        size_t n = min((size_t)feed_n, samples - pos);
-        memcpy(in, audio + pos, n * sizeof(int16_t));
-        if (n < (size_t)feed_n) memset(in + n, 0, (feed_n - n) * sizeof(int16_t));
+    // PTT audio ends the instant the button is released. AFE has a few frames
+    // of latency and MultiNet only commits a result after trailing silence, so
+    // append ~0.7s of silence to flush the pipeline.
+    const size_t tail = SAMPLE_RATE * 7 / 10;
+    const size_t total = samples + tail;
+    int found_id = -1; float found_prob = 0.0f; bool done = false;
+    for (size_t pos = 0; pos < total && !done; pos += feed_n) {
+        for (int k = 0; k < feed_n; ++k) {
+            size_t s = pos + k;
+            in[k] = (s < samples) ? audio[s] : 0;
+        }
         if (afe->feed(afe_data, in) < 0) continue;
-        afe_fetch_result_t* r = afe->fetch_with_delay(afe_data, 2 / portTICK_PERIOD_MS);
+        afe_fetch_result_t* r = afe->fetch_with_delay(afe_data, 50 / portTICK_PERIOD_MS);
         if (!r || r->ret_value != ESP_OK || !r->data) continue;
         esp_mn_state_t st = mn->detect(mn_data, r->data);
         if (st == ESP_MN_STATE_DETECTED) {
             esp_mn_results_t* res = mn->get_results(mn_data);
-            if (res && res->num > 0) {
-                found_id = res->command_id[0];
-                found_prob = res->prob[0];
-                found = true;
-            }
-        }
+            if (res && res->num > 0) { found_id = res->command_id[0]; found_prob = res->prob[0]; }
+            done = true;
+        } else if (st == ESP_MN_STATE_TIMEOUT) done = true;
     }
-    free(in);
-    if (found_id < 0 || found_prob < MIN_COMMAND_PROB) return -1;
-    return found_id;
+    heap_caps_free(in);
+    Serial.printf("FOX: MultiNet id=%d prob=%.2f\n", found_id, found_prob);
+    if (found_id < 0) return -1;
+    float need = (found_id >= 60) ? MIN_TOPIC_PROB : MIN_COMMAND_PROB;
+    return (found_prob >= need) ? found_id : -1;
 }
 
 // ============================================================================
@@ -339,7 +364,6 @@ static void add_tools(JsonDocument& q) {
     if (cfg.tool_wifi) fn("wifi_scan", "Scan for nearby WiFi access points; returns count and strongest.");
     fn("space_weather", "Get the current NOAA planetary Kp index and whether auroras are likely.");
     fn("weather", "Get the local weather for the configured location.");
-    if (cfg.tool_ir)   fn("tv_power", "Send the learned TV power IR code (toggle the TV on/off).");
 }
 
 // Cloud chat with one round of tool-calling. If the model asks for a tool, we
@@ -425,7 +449,7 @@ static String cloud_transcribe(int16_t* audio, size_t samples) {
     memcpy(wav + 36, "data", 4); memcpy(wav + 40, &data_bytes, 4);
 
     size_t total = head.length() + 44 + data_bytes + tail.length();
-    uint8_t* buf = (uint8_t*)heap_caps_malloc(total, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    uint8_t* buf = (uint8_t*)fox_alloc(total);
     if (!buf) return "";
     size_t o = 0;
     memcpy(buf + o, head.c_str(), head.length()); o += head.length();
@@ -519,6 +543,71 @@ void menu_dispatch(const char* id) {
     else launch(id);
 }
 
+// ============================================================================
+//  Conversation layer. MultiNet gives us a small vocabulary; this makes it feel
+//  like talking to a little creature: a recognised topic gets an on-topic,
+//  mood-coloured reply; unrecognised speech gets a reply to the SHAPE of what
+//  you said (short/long), keeps the turn going with a question of its own, and
+//  only occasionally hints at things it understands. Every line goes through
+//  speak() -> fox_dress() so the personality/brain flavours it.
+// ============================================================================
+template <size_t N> static const char* pick_line(const char* const (&a)[N]) { return a[esp_random() % N]; }
+
+static void converse_topic(const char* id) {
+    FoxMood m = fox_mood(needs);
+    needs_interact(needs, false);
+    static const char* LOVE[]   = {"aww. i love you too", "*happy tail wiggle*", "you're my favorite human", "that makes my ears all warm"};
+    static const char* SAD[]    = {"oh no. come here, i'll sit with you", "i'm right here. want to tell me about it?", "*leans on you* it's okay", "sad days pass. i'll keep you company"};
+    static const char* HAPPY[]  = {"yay! happy you makes happy me", "*bounces* tell me what happened!", "that's the best news", "hehe, your good mood is contagious"};
+    static const char* TIRED[]  = {"me too... cozy nap?", "*yawns* rest a little, i'll watch", "sleepy foxes unite", "maybe a break would help"};
+    static const char* JOKE[]   = {"why did the fox cross the road? to get to the other den!", "what do you call a sleepy fox? a snoozie!", "i tried to catch fog. i mist.", "why are foxes good at drums? they have great paws-ition"};
+    static const char* THANKS[] = {"you're welcome!", "anytime, friend", "hehe, happy to help", "*proud little nod*"};
+    static const char* SORRY[]  = {"it's okay, i forgive you", "no worries at all", "we're good, promise", "*nuzzles* all better"};
+    static const char* MORN[]   = {"good morning! did you sleep well?", "morning! i'm ready for the day", "*stretches* hi hi, good morning"};
+    static const char* BYE[]    = {"bye bye! come back soon", "see you later~", "i'll be right here waiting"};
+    static const char* BORED[]  = {"ooh, want to play wormhole?", "let's explore the maze!", "i could show you pretty lights", "want to play twenty questions?"};
+    static const char* PRAISE[] = {"*happy wiggle* thank you!", "i'm learning!", "you're pretty smart too"};
+    static const char* DOING[]  = {"just being a fox", "listening to the air around us", "thinking about snacks", "watching you, mostly"};
+    static const char* FRIEND[] = {"of course we're friends!", "best friends", "i like you a whole lot"};
+    const char* line = "hmm?";
+    if      (!strcmp(id, "t_love"))    line = pick_line(LOVE);
+    else if (!strcmp(id, "t_sad"))     line = pick_line(SAD);
+    else if (!strcmp(id, "t_happy"))   line = pick_line(HAPPY);
+    else if (!strcmp(id, "t_tired"))   line = pick_line(TIRED);
+    else if (!strcmp(id, "t_joke"))    line = pick_line(JOKE);
+    else if (!strcmp(id, "t_thanks"))  line = pick_line(THANKS);
+    else if (!strcmp(id, "t_sorry"))   line = pick_line(SORRY);
+    else if (!strcmp(id, "t_morning")) line = pick_line(MORN);
+    else if (!strcmp(id, "t_bye"))     line = pick_line(BYE);
+    else if (!strcmp(id, "t_bored"))   line = pick_line(BORED);
+    else if (!strcmp(id, "t_praise"))  line = pick_line(PRAISE);
+    else if (!strcmp(id, "t_doing"))   line = pick_line(DOING);
+    else if (!strcmp(id, "t_friend"))  line = pick_line(FRIEND);
+    else if (!strcmp(id, "t_name"))  { speak(String("i'm ") + cfg.name + "! your fox"); return; }
+    if (m == MOOD_GRUMPY && esp_random() % 3 == 0) line = "hmph... okay, fine. i heard you";
+    speak(line);
+}
+
+// Unrecognised speech: answer the SHAPE of it, keep the conversation moving.
+static uint8_t s_miss_streak = 0;
+static void converse_unheard(size_t samples) {
+    uint32_t ms = (uint32_t)(samples * 1000ULL / SAMPLE_RATE);
+    static const char* SHORT_R[] = {"mm?", "hehe", "oh?", "really?", "*tilts head*"};
+    static const char* LONG_R[]  = {"ooh, tell me more!", "wow, and then what?", "i'm listening~", "*ears perk up* go on", "that sounds like a lot"};
+    static const char* ASK[]     = {"how are you feeling?", "want to play something?", "what's on your mind?", "did something happen today?"};
+    FoxMood m = fox_mood(needs);
+    needs_interact(needs, false);
+    ++s_miss_streak;
+    if (m == MOOD_SLEEPY) speak("*sleepy blink* mmh?");
+    else speak(ms > 1800 ? pick_line(LONG_R) : pick_line(SHORT_R));
+    if (s_miss_streak >= 3) {
+        s_miss_streak = 0;
+        speak("i know words like: play with me, tell me a joke, scan wifi, and what time is it");
+    } else if (esp_random() % 2) {
+        speak(pick_line(ASK));
+    }
+}
+
 static void do_action(const char* action) {
     needs_interact(needs, false);
     if (!strcmp(action, "greet")) {
@@ -553,6 +642,8 @@ static void do_action(const char* action) {
     } else if (!strcmp(action, "recall")) {
         String m = mem_tail(300);
         speak(m.length() ? "i remember: " + m : "we haven't made memories yet");
+    } else if (!strncmp(action, "t_", 2)) {
+        converse_topic(action);
     } else {
         // everything else is a launchable tool/game/report
         launch(action);
@@ -590,32 +681,20 @@ static void process_utterance(int16_t* audio, size_t n) {
         speak("i'll remember this moment~");
         return;
     }
-    // Offline command grammar first (needs model partition + Multinet).
-    if (!speech_ready) {
-        Serial.println("FOX: utterance ignored — offline speech not ready (model?)");
-        face_caption("no offline hearing");
-        speak("i can't hear commands offline until the speech model is flashed");
-        return;
-    }
-    int id = recognize_offline(audio, n);
-    Serial.printf("FOX: offline recognize id=%d samples=%u\n", id, (unsigned)n);
+    // Offline command grammar first (needs model partition + MultiNet).
+    int id = speech_ready ? recognize_offline(audio, n) : -1;
     if (id >= 0) {
+        s_miss_streak = 0;
         for (size_t i = 0; i < COMMAND_COUNT; ++i)
             if (COMMANDS[i].id == id) { do_action(COMMANDS[i].action); return; }
     }
-    // Not a known command
+    // Not recognised offline. Cloud (if configured) can transcribe anything.
     if (cfg.cloud_enabled) {
         String tx = cloud_transcribe(audio, n);
-        if (tx.length()) handle_free_text(tx);
-        else {
-            face_caption("didn't catch that");
-            speak("i didn't catch a command. try say status, or scan, or play a game");
-        }
-    } else {
-        // Do NOT fox_reflect empty — that pretends to understand.
-        face_caption("no command matched");
-        speak("i didn't catch a command. try: status, scan wifi, ble radar, play wormhole");
+        if (tx.length()) { s_miss_streak = 0; handle_free_text(tx); return; }
     }
+    if (!speech_ready) Serial.println("FOX: speech model not loaded — replying conversationally");
+    converse_unheard(n);
 }
 
 // ============================================================================
@@ -629,27 +708,22 @@ static void process_utterance(int16_t* audio, size_t n) {
 #include "fox_audio.h"
 #include <Wire.h>
 
-// AtomS3R backlight = LP5562 @ 0x30 on system I2C (SDA=45, SCL=0).
-// Use Wire1 so Atomic Echo Base can keep Wire on 38/39 for ES8311.
+// AtomS3R backlight = LP5562 @ 0x30 on the internal I2C bus (SDA=45, SCL=0) —
+// the SAME bus M5Unified already owns for the BMI270 IMU. Write it through
+// M5.In_I2C (M5's own driver) instead of re-initialising Wire1 on those pins,
+// which put two I2C drivers on one controller. M5GFX's AtomS3R light class also
+// drives this chip via setBrightness(); this is belt-and-braces.
 static void fox_backlight(uint8_t brightness) {
-    Wire1.end();
-    Wire1.begin(45, 0, 400000);
-    delay(1);
-    auto wr = [](uint8_t reg, uint8_t val) -> bool {
-        Wire1.beginTransmission(0x30);
-        Wire1.write(reg);
-        Wire1.write(val);
-        return Wire1.endTransmission() == 0;
-    };
-    if (!wr(0x00, 0x40)) {
-        Serial.println("FOX: LP5562 no ACK on Wire1");
+    if (!M5.In_I2C.isEnabled()) return;
+    const uint32_t f = 400000;
+    if (!M5.In_I2C.writeRegister8(0x30, 0x00, 0x40, f)) {   // ENABLE
+        Serial.println("FOX: LP5562 no ACK (M5GFX light handles backlight)");
         return;
     }
     delay(1);
-    wr(0x08, 0x01);
-    wr(0x70, 0x00);
-    wr(0x0E, brightness);
-    Serial.printf("FOX: LP5562 backlight %u\n", brightness);
+    M5.In_I2C.writeRegister8(0x30, 0x08, 0x01, f);          // CONFIG: internal clk
+    M5.In_I2C.writeRegister8(0x30, 0x70, 0x00, f);          // LED_MAP: direct PWM
+    M5.In_I2C.writeRegister8(0x30, 0x0E, brightness, f);    // B_PWM = backlight
 }
 
 static uint32_t last_activity = 0;
@@ -693,8 +767,6 @@ void setup() {
     if (!audio_begin(cfg.volume)) {
         M5.Display.drawString("audio fail", 64, 90);
         Serial.println("FOX: audio begin failed — continuing without sound");
-    } else {
-        fox_backlight(200);  // Wire1 only — safe after Echo owns Wire
     }
 
     setenv("TZ", cfg.timezone.c_str(), 1); tzset();
@@ -720,14 +792,17 @@ void setup() {
     // Radios: only power down when there is no cloud use. (Do NOT btStop() —
     // BLE tools need the controller; stopping it here would break BLE radar.)
     if (!cfg.cloud_enabled) { WiFi.mode(WIFI_OFF); }
-    setCpuFrequencyMhz(160);
 
     needs.last_tick = millis();
     face_wake();
     face_splash(cfg);            // custom boot splash (name/effect/fox graphic)
     speak(String("hi! i'm ") + cfg.name + "~");
     last_activity = millis();    // don't light-sleep 2 min after boot with activity=0
-    Serial.println("FOX: ready");
+    Serial.printf("FOX: ready  psram=%uKB free_internal=%uKB speech=%d\n",
+                  (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024),
+                  (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
+                  (int)speech_ready);
+    Serial.println("FOX_READY");  // web flasher waits for this before sending config
 }
 
 void loop() {
@@ -738,25 +813,25 @@ void loop() {
 
     uint32_t now = millis();
 
-    // --- Push-to-talk + double-click-to-menu ------------------------------
-    // Double-click opens the menu from anywhere (M5 detects it for us).
-    if (M5.BtnA.wasDoubleClicked()) {
+    // --- Button: HOLD = talk, DOUBLE = menu, single TAP = pet/boop ---------
+    ButtonEvent ev = input_button_event();
+    if (ev == BTN_HOLD_START) {
+        face_listen();
+        size_t n = 0;
+        int16_t* audio = capture_while_held(&n);   // returns on release / max
+        face_think();
+        if (audio && n > SAMPLE_RATE / 3) process_utterance(audio, n);
+        else if (audio) speak("hm? hold me a little longer while you talk~");
+        if (audio) heap_caps_free(audio);
+        last_activity = millis();
+    } else if (ev == BTN_DOUBLE) {
         open_menu();
-        last_activity = now;
-    } else {
-        ButtonEvent ev = input_button_event();
-        if (ev == BTN_HOLD_START) {
-            face_listen();
-            size_t n = 0;
-            int16_t* audio = capture_while_held(&n);   // returns on release / max
-            face_think();
-            if (audio && n > SAMPLE_RATE / 3) process_utterance(audio, n);
-            if (audio) heap_caps_free(audio);
-            last_activity = now;
-        } else if (ev == BTN_TAP) {
-            open_menu();
-            last_activity = now;
-        }
+        last_activity = millis();
+    } else if (ev == BTN_TAP) {
+        needs_interact(needs, false);
+        static const char* BOOP[] = {"boop!", "hehe, that tickles", "*happy squeak*", "hi hi!", "*wiggles*"};
+        speak(BOOP[esp_random() % 5]);
+        last_activity = millis();
     }
 
     // If a game/tool/toy asked to bail to the menu (double-click), do it now.

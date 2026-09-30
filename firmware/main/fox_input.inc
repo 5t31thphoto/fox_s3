@@ -6,27 +6,45 @@
 
 // (ButtonEvent and Gesture enums are declared in fox_decls.h)
 
-static uint32_t btn_down_at = 0;
-static bool     btn_was_down = false;
+// ---- button: tap / double-tap / hold state machine --------------------------
+// Owner's rule: on the fox face, HOLD = talk, DOUBLE-click = menu, SINGLE click
+// = a little interaction (never "exit"). A single tap is only reported after the
+// double-click window closes, so a double-click never fires a tap first.
+static constexpr uint32_t BTN_DEBOUNCE_MS  = 25;
+static constexpr uint32_t BTN_DOUBLE_GAP_MS = 320;
 
 void input_begin() {
     pinMode((int)USER_GPIO, INPUT_PULLUP);
     M5.Imu.begin();
 }
 
-// Distinguish a quick tap (open menu) from a hold (push-to-talk). We report
-// HOLD_START as soon as the press passes PTT_MIN so capture can begin live.
 ButtonEvent input_button_event() {
+    static bool     down_prev   = false;
+    static uint32_t down_at     = 0;
+    static uint32_t up_at       = 0;
+    static uint8_t  taps        = 0;
+    static bool     hold_fired  = false;
     bool down = digitalRead((int)USER_GPIO) == LOW;
     uint32_t now = millis();
-    if (down && !btn_was_down) { btn_down_at = now; btn_was_down = true; }
-    if (down && btn_was_down && now - btn_down_at > PTT_MIN_MS) {
-        return BTN_HOLD_START;   // caller will capture until release
+
+    if (down && !down_prev) {                       // press
+        if (now - up_at < BTN_DEBOUNCE_MS) { down_prev = down; return BTN_NONE; }
+        down_at = now; hold_fired = false;
     }
-    if (!down && btn_was_down) {
-        uint32_t held = now - btn_down_at;
-        btn_was_down = false;
-        if (held <= PTT_MIN_MS) return BTN_TAP;
+    if (down && !hold_fired && now - down_at > PTT_MIN_MS) {
+        hold_fired = true; taps = 0;                // a hold cancels pending taps
+        down_prev = down;
+        return BTN_HOLD_START;                      // caller captures until release
+    }
+    if (!down && down_prev) {                       // release
+        up_at = now;
+        if (!hold_fired && now - down_at >= BTN_DEBOUNCE_MS) {
+            if (++taps >= 2) { taps = 0; down_prev = down; return BTN_DOUBLE; }
+        }
+    }
+    down_prev = down;
+    if (!down && taps == 1 && now - up_at > BTN_DOUBLE_GAP_MS) {
+        taps = 0; return BTN_TAP;                   // window closed: single tap
     }
     return BTN_NONE;
 }
@@ -71,19 +89,16 @@ bool input_wait_yes(uint32_t timeout_ms) {
 // @16k; caller frees. Also drives the mouth from live level for lip-sync.
 int16_t* capture_while_held(size_t* out_n) {
     size_t cap = SAMPLE_RATE * (PTT_MAX_MS / 1000) + SAMPLE_RATE;
-    int16_t* buf = (int16_t*)heap_caps_malloc(cap * sizeof(int16_t),
-                                              MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    int16_t* buf = (int16_t*)fox_alloc(cap * sizeof(int16_t));
     if (!buf) { *out_n = 0; return nullptr; }
     audio_speaker_end();
     if (!g_echo_ok) { *out_n = 0; return buf; }
     size_t n = 0; uint32_t t0 = millis();
     const size_t CH = 256;
     while (button_is_down() && n + CH < cap && millis() - t0 < PTT_MAX_MS) {
-        if (audio_record(buf + n, CH)) {
-            long s = 0; for (size_t i = 0; i < CH; ++i) s += abs(buf[n + i]);
-            face_set_mouth((s / (float)CH) / 8000.0f);
-            n += CH;
-        }
+        // true 16k mono for MultiNet/STT; the mouth stays in "listening" pose
+        // (mic-driven mouth is puppet mode only)
+        if (audio_record_mono(buf + n, CH)) n += CH;
         M5.update();
     }
     audio_mic_end();
@@ -95,23 +110,35 @@ int16_t* capture_while_held(size_t* out_n) {
 // silence or when `timeout_ms` elapses with no speech. Used in conversation mode.
 int16_t* capture_vad_burst(size_t* out_n, uint32_t timeout_ms) {
     size_t cap = SAMPLE_RATE * 12;
-    int16_t* buf = (int16_t*)heap_caps_malloc(cap * sizeof(int16_t),
-                                              MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    int16_t* buf = (int16_t*)fox_alloc(cap * sizeof(int16_t));
     if (!buf) { *out_n = 0; return nullptr; }
     audio_speaker_end();
     if (!g_echo_ok) { *out_n = 0; return buf; }
     size_t n = 0; uint32_t t0 = millis(); uint32_t last_voice = 0;
     bool started = false;
     const size_t CH = 256;
+    float floor_lvl = -1.0f;                 // learned ambient level
+    size_t keep_pre = SAMPLE_RATE / 4;       // keep ~250ms before speech onset
     while (n + CH < cap) {
         if (millis() - t0 > timeout_ms && !started) break;
-        if (audio_record(buf + n, CH)) {
+        if (audio_record_mono(buf + n, CH)) {
             long s = 0; for (size_t i = 0; i < CH; ++i) s += abs(buf[n + i]);
             float lvl = (s / (float)CH);
-            face_set_mouth(lvl / 8000.0f);
-            if (lvl > 900) { started = true; last_voice = millis(); }
+            if (floor_lvl < 0) floor_lvl = lvl;
+            if (!started) floor_lvl = floor_lvl * 0.95f + lvl * 0.05f;
+            float thresh = max(300.0f, floor_lvl * 3.0f);
+            if (lvl > thresh) {
+                if (!started) {               // drop leading silence, keep a lead-in
+                    size_t lead = n > keep_pre ? n - keep_pre : 0;
+                    if (lead) { memmove(buf, buf + lead, (n - lead + CH) * sizeof(int16_t)); n -= lead; }
+                }
+                started = true; last_voice = millis();
+            }
             n += CH;
             if (started && millis() - last_voice > 900) break;
+            if (!started && n > SAMPLE_RATE * 2) {  // rolling pre-roll window
+                memmove(buf, buf + CH, (n - CH) * sizeof(int16_t)); n -= CH;
+            }
         }
         M5.update();
         if (button_is_down()) break;
@@ -147,6 +174,9 @@ static bool imu_picked_up() {
 // would sleep forever. We instead use *light* sleep with a GPIO wake source,
 // which works on any GPIO, and also wake on a timer to check the IMU.
 void enter_light_sleep() {
+    // Light sleep stops the USB PHY clock: the USB-serial link to the computer
+    // (web flasher / config) would drop. Never nap while a host is connected.
+    if ((bool)Serial) { face_caption("*yawns*"); return; }
     face_caption("*curls up*");
     face_dim();
     audio_speaker_end(); audio_mic_end();
@@ -248,6 +278,10 @@ static void menu_render(int sel) {
 
 void open_menu() {
     int sel = 0;
+    // The double-click that opened us is still in M5's button history; wait for
+    // release and drain it so it can't instantly "pick" the first item.
+    while (digitalRead((int)USER_GPIO) == LOW) { M5.update(); delay(5); }
+    M5.update(); (void)M5.BtnA.wasClicked(); (void)M5.BtnA.wasDoubleClicked();
     uint32_t idle = millis();
     menu_render(sel);
     for (;;) {
@@ -313,7 +347,6 @@ static void apply_config_json(const String& js) {
     // per-tool enables + lip-sync
     if (d["tool_ble"].is<bool>())   cfg.tool_ble  = d["tool_ble"].as<bool>();
     if (d["tool_wifi"].is<bool>())  cfg.tool_wifi = d["tool_wifi"].as<bool>();
-    if (d["tool_ir"].is<bool>())    cfg.tool_ir   = d["tool_ir"].as<bool>();
     if (d["tool_imu"].is<bool>())   cfg.tool_imu  = d["tool_imu"].as<bool>();
     if (d["lip_sync"].is<bool>())   cfg.lip_sync  = d["lip_sync"].as<bool>();
     save_config();
@@ -327,7 +360,11 @@ static void apply_config_json(const String& js) {
 void input_poll() {
     while (Serial.available()) {
         char c = (char)Serial.read();
-        if (c == '\n') { apply_config_json(serial_line); serial_line = ""; }
-        else if (c != '\r' && serial_line.length() < 1024) serial_line += c;
+        if (c == '\n') {
+            serial_line.trim();
+            if (serial_line == "FOX?") { Serial.println("FOX_READY"); }   // handshake
+            else if (serial_line.startsWith("{")) apply_config_json(serial_line);
+            serial_line = "";
+        } else if (c != '\r' && serial_line.length() < 4096) serial_line += c;
     }
 }

@@ -31,9 +31,16 @@ void audio_set_volume(uint8_t volume);
 void audio_speaker_end();
 void audio_mic_end();
 
-// Record int16 mono @ 16 kHz into buf. Returns true on success.
-// size_samples is number of int16 samples (not bytes).
+// RAW record: the interleaved stereo I2S stream exactly as the codec delivers it
+// (L,R,L,R...). size_samples counts int16 values, so it holds size_samples/2
+// frames. This is what the FFT lip-sync/puppet path is written for.
 bool audio_record(int16_t* buf, size_t size_samples);
+
+// MONO record for speech (MultiNet / cloud STT / VAD): true 16 kHz mono. Reads
+// stereo frames and returns the slot that actually carries the mic (detected
+// from signal energy and latched once, so it works whichever slot the ES8311
+// drives).
+bool audio_record_mono(int16_t* buf, size_t size_samples);
 
 // Play int16 mono PCM. sample_rate is typically 16000 or 22050.
 // Blocks until the chunk has been written (EchoBase play is synchronous-ish).

@@ -218,7 +218,7 @@ static uint32_t s_last_loud = 0;
 static void face_lipsync_from_mic_once() {
     static constexpr size_t WAVE = 256 * 2;
     if (!s_fft) {
-        void* mem = heap_caps_malloc(sizeof(fft_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        void* mem = fox_alloc(sizeof(fft_t));
         if (!mem) return;
         s_fft = new (mem) fft_t();
     }

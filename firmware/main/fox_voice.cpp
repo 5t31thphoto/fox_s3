@@ -17,6 +17,7 @@
 #include "fox_decls.h"
 #include "fox_audio.h"
 #include <esp_heap_caps.h>
+#include <ctype.h>
 
 #if __has_include("picotts.h")
 #include "picotts.h"
@@ -55,44 +56,63 @@ static FoxMood g_speaking_mood = MOOD_CALM;
 
 // ---- PicoTTS path -----------------------------------------------------------
 #if HAVE_PICO
+// PicoTTS: initialised ONCE and kept alive (it needs ~1.1MB, which lives in
+// PSRAM). The sample callback runs on PicoTTS's own task: it only copies the
+// samples, updates the mouth level and writes to I2S (the write blocks, which
+// paces synthesis to real time). Drawing happens on the main task.
 static volatile bool s_tts_done = true;
+static volatile bool s_tts_err  = false;
+static bool s_pico_up = false;
+static bool s_pico_failed = false;   // don't retry a failed init every line
 
 static void pico_cb(int16_t* buf, unsigned count) {
     if (!count) return;
-    int16_t* copy = (int16_t*)heap_caps_malloc(count * sizeof(int16_t),
-                                               MALLOC_CAP_8BIT);
+    int16_t* copy = (int16_t*)fox_alloc(count * sizeof(int16_t));   // Pico reuses buf
     if (!copy) return;
     memcpy(copy, buf, count * sizeof(int16_t));
-    mouth_from_pcm16(copy, count, g_speaking_mood);
+    uint32_t acc = 0;
+    for (unsigned i = 0; i < count; ++i) acc += abs(copy[i]);
+    face_set_mouth((acc / (float)count) / 6000.0f);
     audio_play_pcm16(copy, count, 16000);
-    while (audio_is_playing()) { taskYIELD(); }
-    free(copy);
+    heap_caps_free(copy);
 }
 static void pico_idle() { s_tts_done = true; }
-static void pico_err()  { s_tts_done = true; }
+static void pico_err()  { s_tts_err = true; s_tts_done = true; }
 
-static bool pico_say(const String& text) {
-    if (!g_echo_ok) return false;
-    audio_set_volume(g_cfg.volume > 100 ? 100 : g_cfg.volume);
-    s_tts_done = false;
+static bool pico_up() {
+    if (s_pico_up) return true;
+    if (s_pico_failed) return false;
     if (!picotts_init(5, pico_cb, 1)) {
-        Serial.println("FOX: PicoTTS init failed; using SAM fallback");
+        Serial.printf("FOX: PicoTTS init failed (free psram=%uKB) — SAM fallback\n",
+                      (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
+        s_pico_failed = true;
         return false;
     }
     picotts_set_idle_notify(pico_idle);
     picotts_set_error_notify(pico_err);
-    // PicoTTS buffers text until it sees a sentence terminator; without one it
-    // never flushes (-> 12s timeout -> SAM). Guarantee a . ! or ? at the end,
-    // and feed len+1 so the null terminator enters the analysis queue.
+    s_pico_up = true;
+    Serial.println("FOX: PicoTTS ready");
+    return true;
+}
+
+static bool pico_say(const String& text) {
+    if (!g_echo_ok || !pico_up()) return false;
+    audio_set_volume(g_cfg.volume > 100 ? 100 : g_cfg.volume);
     String t = text; t.trim();
-    char lc = t.length() ? t[t.length()-1] : '.';
+    if (!t.length()) return false;
+    char lc = t[t.length() - 1];
     if (lc != '.' && lc != '!' && lc != '?') t += '.';
-    picotts_add(t.c_str(), t.length() + 1);
-    uint32_t guard = millis();
-    while (!s_tts_done && millis() - guard < 12000) { M5.update(); delay(4); }
-    picotts_shutdown();
-    if (!s_tts_done) {
-        Serial.println("FOX: PicoTTS timeout; using SAM fallback");
+    s_tts_err = false; s_tts_done = false;
+    picotts_add(t.c_str(), t.length() + 1);      // include the \0: "go"
+    uint32_t guard = millis(), budget = 4000 + t.length() * 150;
+    while (!s_tts_done && millis() - guard < budget) {
+        M5.update(); face_draw(g_speaking_mood); delay(20);
+    }
+    while (audio_is_playing()) { M5.update(); delay(5); }
+    face_set_mouth(0); face_draw(g_speaking_mood);
+    if (s_tts_err || !s_tts_done) {
+        Serial.println("FOX: PicoTTS error/timeout — SAM fallback for this line");
+        if (s_tts_err) { picotts_shutdown(); s_pico_up = false; }   // re-init next time
         return false;
     }
     return true;
@@ -125,7 +145,11 @@ static bool sam_say(const String& text) {
         char c = eos ? '.' : s[i];
         bool punct = (c=='.'||c=='!'||c=='?'||c==','||c==';'||c==':');
         bool boundary = eos || punct;
-        if (!boundary && (i - start) < 130) continue;   // also split runaway phrases
+        // SAM's reciter expands text to phonemes in place in a 256-byte buffer
+        // (~2x growth), so cap each phrase at ~60 chars, breaking on a space.
+        if (!boundary) {
+            if ((i - start) < 60 || c != ' ') continue;
+        }
 
         String phrase = s.substring(start, i);
         phrase.trim();
@@ -195,10 +219,28 @@ static int syllable_estimate(const String& text) {
     return syl < 1 ? 1 : syl;
 }
 
-void voice_say(const String& text, FoxMood mood) {
-    if (!text.length()) return;
+// What the TTS engines should actually pronounce: drop *stage directions*
+// (those stay on the caption) and characters the reciters choke on.
+static String speakable(const String& in) {
+    String out; bool in_action = false;
+    for (size_t i = 0; i < in.length(); ++i) {
+        char c = in[i];
+        if (c == '*') { in_action = !in_action; continue; }
+        if (in_action) continue;
+        if (isalnum((unsigned char)c) || c == ' ' || c == '\'' || c == ',' ||
+            c == '.' || c == '!' || c == '?' || c == ':' || c == '-') out += c;
+        else if (c == '~' || c == '\n') out += ' ';
+    }
+    out.trim();
+    return out;
+}
+
+void voice_say(const String& raw, FoxMood mood) {
+    if (!raw.length()) return;
     audio_mic_end();
     g_speaking_mood = mood;
+    String text = speakable(raw);
+    if (!text.length()) { voice_babble(mood, 2); return; }   // pure *action*: chirp
 
     bool spoke = false;
     if (g_cfg.voice_pack == "chatterbox") {

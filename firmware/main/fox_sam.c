@@ -1,6 +1,15 @@
 // Real SAM (Software Automatic Mouth) via ESP8266SAM / s-macke port.
 // Collects 8-bit unsigned mono @ 22050 Hz into a malloc buffer for fox_voice.
 #include "esp_heap_caps.h"
+/* prefer PSRAM, fall back to internal RAM (never fail just because PSRAM is absent) */
+static void* sam_alloc(size_t n) {
+    void* p = heap_caps_malloc(n, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    return p ? p : heap_caps_malloc(n, MALLOC_CAP_8BIT);
+}
+static void* sam_grow(void* old, size_t n) {
+    void* p = heap_caps_realloc(old, n, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    return p ? p : heap_caps_realloc(old, n, MALLOC_CAP_8BIT);
+}
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -21,7 +30,7 @@ static void sam_cb(void* user, unsigned char b) {
     SamBuf* s = (SamBuf*)user;
     if (s->length >= s->capacity) {
         int nc = s->capacity ? s->capacity * 2 : 8192;
-        uint8_t* n = (uint8_t*)heap_caps_realloc(s->buf, nc, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        uint8_t* n = (uint8_t*)sam_grow(s->buf, nc);
         if (!n) return;
         s->buf = n;
         s->capacity = nc;
@@ -65,7 +74,7 @@ int sam_render(const char* text, uint8_t speed, uint8_t pitch,
     SetInput(input);
 
     SamBuf sb = {0};
-    sb.buf = (uint8_t*)heap_caps_malloc(16384, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    sb.buf = (uint8_t*)sam_alloc(16384);
     if (!sb.buf) {
         free(samdata);
         samdata = NULL;

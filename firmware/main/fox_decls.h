@@ -88,7 +88,7 @@ String net_space_weather();
 String net_aurora();
 
 // ---- input: buttons / capture / menu / sleep (fox_input.inc) ---------------
-enum ButtonEvent : uint8_t { BTN_NONE, BTN_TAP, BTN_HOLD_START };
+enum ButtonEvent : uint8_t { BTN_NONE, BTN_TAP, BTN_DOUBLE, BTN_HOLD_START };
 enum Gesture     : uint8_t { GST_NONE, GST_TAP, GST_SHAKE, GST_TILT };
 void        input_begin();
 void        input_poll();

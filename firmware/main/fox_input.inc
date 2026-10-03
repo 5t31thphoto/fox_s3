@@ -97,6 +97,7 @@ int16_t* capture_while_held(size_t* out_n) {
     if (!buf) { *out_n = 0; return nullptr; }
     audio_speaker_end();
     if (!g_echo_ok) { *out_n = 0; return buf; }
+    audio_mic_speech_gain(true);            // speech gain (no clipping)
     size_t n = 0; uint32_t t0 = millis();
     const size_t CH = 256;
     while (button_is_down() && n + CH < cap && millis() - t0 < PTT_MAX_MS) {
@@ -105,6 +106,7 @@ int16_t* capture_while_held(size_t* out_n) {
         if (audio_record_mono(buf + n, CH)) n += CH;
         M5.update();
     }
+    audio_mic_speech_gain(false);           // back to puppet-mode gain
     audio_mic_end();
     *out_n = n;
     return buf;
@@ -118,6 +120,7 @@ int16_t* capture_vad_burst(size_t* out_n, uint32_t timeout_ms) {
     if (!buf) { *out_n = 0; return nullptr; }
     audio_speaker_end();
     if (!g_echo_ok) { *out_n = 0; return buf; }
+    audio_mic_speech_gain(true);            // speech gain (no clipping)
     size_t n = 0; uint32_t t0 = millis(); uint32_t last_voice = 0;
     bool started = false;
     const size_t CH = 256;
@@ -147,6 +150,7 @@ int16_t* capture_vad_burst(size_t* out_n, uint32_t timeout_ms) {
         M5.update();
         if (button_is_down()) break;
     }
+    audio_mic_speech_gain(false);           // back to puppet-mode gain
     audio_mic_end();
     *out_n = started ? n : 0;
     return buf;
@@ -254,9 +258,11 @@ static const MenuItem MENU[] = {
     {"weather",            "weather"},
     {"space weather",      "space"},
     {"aurora tonight?",    "aurora"},
+    {"bitcoin price",      "btc"},
     {"-- settings --",     "nop"},
     {"volume",             "volume"},
     {"voice pack",         "voice"},
+    {"brain online/offline","brain"},
     {"forget memories",    "forget"},
     {"sleep",              "sleep"},
     {"close",              "close"},
@@ -343,6 +349,7 @@ static void apply_config_json(const String& js) {
     if (d["pass"].is<const char*>())  cfg.wifi_pass = d["pass"].as<String>();
     if (d["key"].is<const char*>())   cfg.api_key = d["key"].as<String>();
     if (d["chat_model"].is<const char*>()) cfg.chat_model = d["chat_model"].as<String>();
+    if (d["brain"].is<const char*>()) cfg.brain_online = (d["brain"].as<String>() != "offline");
     if (d["stt_model"].is<const char*>())  cfg.stt_model = d["stt_model"].as<String>();
     if (d["api_base"].is<const char*>())   cfg.api_base = d["api_base"].as<String>();
     if (d["personality"].is<const char*>()) cfg.personality = d["personality"].as<String>();

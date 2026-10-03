@@ -84,6 +84,7 @@ uint32_t rf_lifetime_friends();
 
 // ---- network reports (fox_net.inc) -----------------------------------------
 String net_weather();
+String net_bitcoin_price();
 String net_space_weather();
 String net_aurora();
 

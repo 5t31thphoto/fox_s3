@@ -219,10 +219,14 @@ static void radar_worker(void* arg) {
                 radar_push(WiFi.BSSIDstr(i).c_str(), WiFi.SSID(i).c_str(), WiFi.RSSI(i), ym);
             WiFi.scanDelete();
         } else if (ble_scan) {
+            // Same 1 s blocking scan that worked from the main loop, but never
+            // restarted back-to-back: the previous scan must fully wind down
+            // before start() succeeds again (the old loop always left a gap).
             BLEScanResults* res = ble_scan->start(1, false);
             float ym = (y0 + radar_live_yaw) * 0.5f;
+            int n = res ? res->getCount() : -1;
             if (res) {
-                for (int i = 0; i < res->getCount(); ++i) {
+                for (int i = 0; i < n; ++i) {
                     BLEAdvertisedDevice d = res->getDevice(i);
                     String id = String(d.getAddress().toString().c_str());
                     String nm = d.haveName() ? String(d.getName().c_str()) : id.substring(0, 8);
@@ -230,6 +234,10 @@ static void radar_worker(void* arg) {
                 }
                 ble_scan->clearResults();
             }
+            static uint32_t last_log = 0;
+            if (millis() - last_log > 3000) { last_log = millis(); Serial.printf("FOX: BLE scan -> %d devices\n", n); }
+            ble_scan->stop();                               // make sure the scan is closed
+            vTaskDelay(pdMS_TO_TICKS(n < 0 ? 600 : 250));   // wind-down gap (+ backoff on failure)
         } else {
             vTaskDelay(pdMS_TO_TICKS(100));
         }

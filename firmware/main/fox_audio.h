@@ -42,6 +42,9 @@ bool audio_record(int16_t* buf, size_t size_samples);
 // drives).
 bool audio_record_mono(int16_t* buf, size_t size_samples);
 
+// Lower mic gain while capturing speech (true), puppet-mode gain otherwise.
+void audio_mic_speech_gain(bool speech);
+
 // Play int16 mono PCM. sample_rate is typically 16000 or 22050.
 // Blocks until the chunk has been written (EchoBase play is synchronous-ish).
 bool audio_play_pcm16(const int16_t* buf, size_t size_samples, int sample_rate);

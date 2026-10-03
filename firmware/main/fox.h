@@ -53,7 +53,7 @@ struct FoxConfig {
     String wifi_ssid    = "";
     String wifi_pass    = "";
     String api_key      = "";                          // Groq (or compatible) key, NVS-only
-    String chat_model   = "llama-3.1-8b-instant";
+    String chat_model   = "openai/gpt-oss-20b";   // auto-replaced if Groq retires it
     String stt_model    = "whisper-large-v3-turbo";
     String api_base     = "https://api.groq.com/openai/v1";
     String personality  = "playful, curious, warm, a little mischievous";
@@ -70,6 +70,7 @@ struct FoxConfig {
     String weights_url   = "";                          // for "stream" mode
     String context_summary = "";                        // tiny persistent summary
     bool   cloud_enabled = false;                      // derived: key present
+    bool   brain_online  = true;                       // user switch: online (Groq) vs offline brain
     bool   conversation  = false;
     bool   persistence   = true;
     bool   wifi_enabled  = true;

@@ -47,6 +47,9 @@
 // ============================================================================
 static FoxConfig cfg;
 static FoxNeeds  needs;
+// The online (Groq) brain is used only when a key is configured AND the user
+// has it switched on (menu "brain" / "go online" / "go offline").
+static inline bool cloud_brain() { return cfg.cloud_enabled && cfg.brain_online; }
 static Preferences prefs;
 // Set by any game/tool/toy when the user double-clicks to bail to the menu.
 // The main loop honors it after the app's own loop returns.
@@ -89,6 +92,7 @@ static void load_config() {
     cfg.captions    = prefs.getBool("cap", cfg.captions);
     prefs.end();
     cfg.cloud_enabled = cfg.api_key.length() > 0;
+    cfg.brain_online  = prefs.getBool("bon", cfg.brain_online);
 }
 
 void save_config() {
@@ -100,6 +104,7 @@ void save_config() {
     prefs.putString("pass", cfg.wifi_pass);
     prefs.putString("key", cfg.api_key);
     prefs.putString("cmodel", cfg.chat_model);
+    prefs.putBool("bon", cfg.brain_online);
     prefs.putString("smodel", cfg.stt_model);
     prefs.putString("abase", cfg.api_base);
     prefs.putString("pers", cfg.personality);
@@ -135,50 +140,108 @@ struct Command { int id; const char* phrases; const char* action; };
 // separately (MultiNet rejects a single string containing ';'). Lowercase
 // letters and spaces only. IDs < 60 are commands; 60+ are conversation topics.
 static const Command COMMANDS[] = {
-    {1,  "hello fox;hey fox;hi fox;hello;hi there",           "greet"},
-    {2,  "what time is it;tell me the time;what is the time", "time"},
-    {3,  "how are you;how do you feel;are you okay",          "mood"},
-    {4,  "what is the weather;weather report;is it raining;tell me the weather;how is the weather", "weather"},
-    {6,  "volume up;louder;speak up",                         "vol_up"},
-    {7,  "volume down;quieter;be quiet",                      "vol_dn"},
-    {8,  "go to sleep;good night;time for bed",               "sleep"},
-    {9,  "conversation mode;lets chat;talk with me",          "conv_on"},
-    {10, "remember this;remember that",                       "remember"},
-    {11, "what do you remember;tell me a memory",             "recall"},
-    {12, "open the menu;show menu;show me the menu",          "menu"},
-    {13, "scan for devices;bluetooth radar;find bluetooth",   "ble_radar"},
-    {14, "scan wifi;wifi radar;find wifi",                    "wifi_radar"},
-    {15, "sniff packets;sniffer mode;hunt mode;pwnagotchi",   "sniffer"},
-    {16, "play wormhole;fly the ship",                        "wormhole"},
-    {17, "catch the treats;catch game",                       "catch"},
-    {18, "twenty questions;guess my thing",                   "twentyq"},
-    {19, "space weather;solar storm",                         "space"},
-    {20, "any aurora;northern lights",                        "aurora"},
-    {21, "lip sync mode;puppet mode",                         "lipsync"},
-    {24, "explore the maze;lets explore",                     "maze"},
-    {25, "play with me;lets hang out;lets play",              "encounter"},
-    {26, "show me colors;pretty lights",                      "plasma"},
-    {27, "starfield;fly through space",                       "starfield"},
-    {28, "what are phones looking for;probe scan",            "probes"},
-    {29, "reaction test;test my reflexes",                    "reaction"},
-    {30, "pet the fox;can i pet you",                         "pet"},
-    {31, "are you hungry;want a snack;feed the fox",          "feed"},
+    {1, "hello;hello fox", "greet"},
+    {2, "what time is it;tell me the time", "time"},
+    {3, "how are you;how do you feel", "mood"},
+    {4, "what is the weather;tell me the weather", "weather"},
+    {6, "volume up;louder", "vol_up"},
+    {7, "volume down;quieter", "vol_dn"},
+    {8, "go to sleep;good night", "sleep"},
+    {9, "conversation mode;lets chat", "conv_on"},
+    {10, "remember this;remember that", "remember"},
+    {11, "what do you remember;tell me a memory", "recall"},
+    {12, "open the menu;show menu", "menu"},
+    {13, "scan for devices;bluetooth radar", "ble_radar"},
+    {14, "scan wifi;wifi radar", "wifi_radar"},
+    {15, "sniffer mode;hunt mode", "sniffer"},
+    {16, "play wormhole;fly the ship", "wormhole"},
+    {17, "catch the treats;catch game", "catch"},
+    {18, "twenty questions;guess my thing", "twentyq"},
+    {19, "space weather;solar storm", "space"},
+    {20, "any aurora;northern lights", "aurora"},
+    {21, "lip sync mode;puppet mode", "lipsync"},
+    {24, "explore the maze;lets explore", "maze"},
+    {25, "play with me;surprise me", "encounter"},
+    {26, "show me colors;pretty lights", "plasma"},
+    {27, "starfield;fly through space", "starfield"},
+    {28, "what are phones looking for;probe scan", "probes"},
+    {29, "reaction test;test my reflexes", "reaction"},
+    {30, "pet the fox;can i pet you", "pet"},
+    {31, "are you hungry;want a snack", "feed"},
+    {32, "play a game;pick a game", "random_game"},
+    {33, "bitcoin price;how much is bitcoin", "btc"},
+    {34, "guess my paw;paw game", "paw"},
+    {35, "tug of war;play tug", "tug"},
+    {36, "ink sandbox;ink mode", "ink"},
+    {37, "spirograph;draw a spiral", "spiro"},
+    {38, "change your voice;switch voice", "voice"},
+    {39, "forget everything;forget your memories", "forget"},
+    {40, "change the volume;volume setting", "volume"},
+    {41, "go offline;offline mode", "brain_off"},
+    {42, "go online;online mode", "brain_on"},
     // ---- conversation topics: recognising ONE of these makes the fox feel
     //      like it understood; the reply is picked per topic + mood ----------
-    {60, "i love you;love you fox;you are cute;good girl",    "t_love"},
-    {61, "i am sad;i feel sad;bad day;i am upset",            "t_sad"},
-    {62, "i am happy;good day;i feel great",                  "t_happy"},
-    {63, "i am tired;so tired;i am sleepy",                   "t_tired"},
-    {64, "tell me a joke;make me laugh;say something funny;tell me something funny", "t_joke"},
-    {65, "thank you;thanks fox;thanks",                       "t_thanks"},
-    {66, "sorry;i am sorry",                                  "t_sorry"},
-    {67, "good morning;morning fox",                          "t_morning"},
-    {68, "goodbye;see you later;bye fox",                     "t_bye"},
-    {69, "what is your name;who are you",                     "t_name"},
-    {70, "i am bored;so bored;nothing to do",                 "t_bored"},
-    {71, "good job;well done;you are smart",                  "t_praise"},
-    {72, "what are you doing;what are you up to",             "t_doing"},
-    {73, "do you like me;are we friends",                     "t_friend"},
+    {60, "i love you;good girl", "t_love"},
+    {61, "i am sad;i feel sad", "t_sad"},
+    {62, "i am happy;good day", "t_happy"},
+    {63, "i am tired;so tired", "t_tired"},
+    {64, "tell me a joke;make me laugh", "t_joke"},
+    {65, "thank you;thanks fox", "t_thanks"},
+    {66, "sorry;i am sorry", "t_sorry"},
+    {67, "good morning;morning fox", "t_morning"},
+    {68, "goodbye;see you later", "t_bye"},
+    {69, "what is your name;who are you", "t_name"},
+    {70, "i am bored;so bored", "t_bored"},
+    {71, "good job;well done", "t_praise"},
+    {72, "what are you doing;what are you up to", "t_doing"},
+    {73, "do you like me;are we friends", "t_friend"},
+    // ---- offline conversation vocabulary (chat_intent) -----------------------
+    {100, "yes;yeah;okay", "c_yes"},
+    {101, "no;no thanks;not now", "c_no"},
+    {102, "maybe;i dont know", "c_maybe"},
+    {103, "why;how come", "c_why"},
+    {104, "tell me more;go on", "c_more"},
+    {105, "what about you;and you", "c_you"},
+    {106, "me too;same here", "c_metoo"},
+    {107, "really;no way", "c_really"},
+    {108, "wow;cool", "c_wow"},
+    {110, "how old are you", "c_age"},
+    {111, "where do you live", "c_home"},
+    {112, "what do you eat;are you hungry fox", "c_food"},
+    {113, "what is your favorite color", "c_color"},
+    {114, "do you have friends", "c_friends"},
+    {115, "do you dream;what do you dream about", "c_dream"},
+    {116, "are you real;are you a robot", "c_real"},
+    {120, "i am hungry;i want food", "c_hungry"},
+    {121, "i am cold;it is cold", "c_cold"},
+    {122, "i am hot;it is hot", "c_hot"},
+    {123, "i am scared;i am afraid", "c_scared"},
+    {124, "i am lonely;i feel alone", "c_lonely"},
+    {125, "i am excited;guess what", "c_excited"},
+    {126, "i am angry;i am mad", "c_angry"},
+    {127, "i am home;i am back", "c_home_back"},
+    {128, "i have to go;i am leaving", "c_leaving"},
+    {129, "i am going to work;i am going to school", "c_work"},
+    {130, "i missed you;i miss you", "c_miss"},
+    {131, "it is my birthday", "c_birthday"},
+    {132, "you are funny;you are silly", "c_funny"},
+    {133, "you are annoying;you are mean", "c_mean"},
+    {134, "give me a hug;hug me", "c_hug"},
+    {135, "it is raining;it is sunny", "c_weather_talk"},
+    {140, "tell me a story", "c_story"},
+    {141, "tell me a fact;tell me something cool", "c_fact"},
+    {142, "tell me a secret", "c_secret"},
+    {143, "sing a song;sing for me", "c_sing"},
+    {144, "give me a compliment;say something nice", "c_compliment"},
+    {145, "cheer me up;make me happy", "c_cheer"},
+    {146, "do a trick;show me a trick", "c_trick"},
+    {147, "make a noise;make a sound", "c_noise"},
+    {148, "flip a coin;heads or tails", "c_coin"},
+    {149, "roll a dice;roll the dice", "c_dice"},
+    {150, "pick a number;give me a number", "c_number"},
+    {151, "yes or no;should i do it", "c_eightball"},
+    {152, "ask me a question;quiz me", "c_askme"},
+    {153, "what should i do;give me an idea", "c_whatdo"},
 };
 static const size_t COMMAND_COUNT = sizeof(COMMANDS) / sizeof(COMMANDS[0]);
 
@@ -282,52 +345,44 @@ static bool init_speech() {
 
 static int recognize_offline(int16_t* audio, size_t samples) {
     if (!speech_ready || !audio || samples < SAMPLE_RATE / 4) return -1;
-    const int feed_n  = afe->get_feed_chunksize(afe_data);
-    const int fetch_n = afe->get_fetch_chunksize(afe_data);
-    afe->reset_buffer(afe_data);
-    mn->clean(mn_data);                          // no state left from last turn
-    int16_t* in = (int16_t*)fox_alloc(feed_n * sizeof(int16_t));
+    // MultiNet takes raw 16 kHz mono directly (Espressif's own MultiNet file
+    // test feeds it this way). The AFE front-end produced NO output for PTT
+    // buffers on this build (log: fetched=0), so it is not used here.
+    const int chunk = mn->get_samp_chunksize(mn_data);
+    mn->clean(mn_data);
+    int16_t* in = (int16_t*)fox_alloc(chunk * sizeof(int16_t));
     if (!in) return -1;
 
-    // Feed the utterance plus ~0.8s of silence (MultiNet commits a result only
-    // after trailing silence; PTT audio ends the instant the button is let go).
-    // After EVERY feed, drain every processed chunk that is ready: feed and
-    // fetch chunk sizes can differ, so a 1:1 feed/fetch pairing starves the
-    // pipeline ("Ringbuffer of AFE is empty") and fragments what MultiNet sees.
-    const size_t tail = SAMPLE_RATE * 8 / 10;
-    const size_t total = samples + tail;
-    int found_id = -1; float found_prob = 0.0f;
-    int fetched = 0; const char* why = "no-result";
-    bool done = false;
-    size_t pos = 0;
-    int idle_drains = 0;
-    while (!done) {
-        if (pos < total) {
-            for (int k = 0; k < feed_n; ++k) {
-                size_t s = pos + k;
-                in[k] = (s < samples) ? audio[s] : 0;
-            }
-            afe->feed(afe_data, in);
-            pos += feed_n;
+    // Level-normalise to a comfortable RMS so MultiNet sees speech at a
+    // consistent loudness (no AGC without the AFE). Gain clamped 0.25x..4x.
+    uint64_t sq = 0; for (size_t i = 0; i < samples; ++i) sq += (int32_t)audio[i] * audio[i];
+    float rms = sqrtf((float)(sq / samples));
+    float g = rms > 1.0f ? 3000.0f / rms : 1.0f;
+    g = fminf(4.0f, fmaxf(0.25f, g));
+
+    // Utterance + ~0.8 s of silence: MultiNet commits a result only after
+    // trailing silence, and PTT audio ends the instant the button is released.
+    const size_t total = samples + SAMPLE_RATE * 8 / 10;
+    int found_id = -1; float found_prob = 0.0f; int chunks = 0;
+    const char* why = "no-result";
+    for (size_t pos = 0; pos < total; pos += chunk) {
+        for (int k = 0; k < chunk; ++k) {
+            size_t s = pos + k;
+            float v = (s < samples) ? audio[s] * g : 0.0f;
+            in[k] = (int16_t)fmaxf(-32767.0f, fminf(32767.0f, v));
         }
-        bool got_any = false;
-        for (;;) {
-            afe_fetch_result_t* r = afe->fetch_with_delay(afe_data, pos < total ? 0 : 20 / portTICK_PERIOD_MS);
-            if (!r || r->ret_value != ESP_OK || !r->data) break;
-            got_any = true; ++fetched;
-            esp_mn_state_t st = mn->detect(mn_data, r->data);
-            if (st == ESP_MN_STATE_DETECTED) {
-                esp_mn_results_t* res = mn->get_results(mn_data);
-                if (res && res->num > 0) { found_id = res->command_id[0]; found_prob = res->prob[0]; }
-                why = "detected"; done = true; break;
-            }
-            if (st == ESP_MN_STATE_TIMEOUT) { why = "mn-timeout"; done = true; break; }
+        ++chunks;
+        esp_mn_state_t st = mn->detect(mn_data, in);
+        if (st == ESP_MN_STATE_DETECTED) {
+            esp_mn_results_t* res = mn->get_results(mn_data);
+            if (res && res->num > 0) { found_id = res->command_id[0]; found_prob = res->prob[0]; }
+            why = "detected"; break;
         }
-        if (pos >= total && !got_any && ++idle_drains > 3) done = true;   // pipeline drained
+        if (st == ESP_MN_STATE_TIMEOUT) { why = "mn-timeout"; break; }
     }
     heap_caps_free(in);
-    Serial.printf("FOX: MultiNet id=%d prob=%.2f (%s, chunks feed=%d fetch=%d fetched=%d)\n",
-                  found_id, found_prob, why, feed_n, fetch_n, fetched);
+    Serial.printf("FOX: MultiNet id=%d prob=%.2f (%s, chunk=%d n=%d gain=%.2f rms=%.0f)\n",
+                  found_id, found_prob, why, chunk, chunks, g, rms);
     if (found_id < 0) return -1;
     float need = (found_id >= 60) ? MIN_TOPIC_PROB : MIN_COMMAND_PROB;
     return (found_prob >= need) ? found_id : -1;
@@ -353,7 +408,10 @@ static String fox_system_prompt() {
                "tiny device. Personality: " + cfg.personality + ". Keep replies "
                "to one or two short, warm, playful sentences. You are a fox, not "
                "an assistant; be a little fidgety and affectionate. Never claim to "
-               "do things the device cannot actually do.\n";
+               "do things the device cannot actually do. Your reply is spoken aloud "
+               "by a tiny voice synthesizer: plain words only, no emoji, no "
+               "markdown, no lists. Use the provided tools for live facts like "
+               "weather, bitcoin price, or nearby wifi and bluetooth.\n";
     String mem = mem_tail(1200);
     if (mem.length()) p += "Recent memories:\n" + mem;
     return p;
@@ -366,7 +424,9 @@ static String run_tool(const String& name, JsonVariantConst args) {
     if (name == "ble_scan")   return String(tool_ble_scan_report());
     if (name == "wifi_scan")  return String(tool_wifi_scan_report());
     if (name == "space_weather") return net_space_weather();
+    if (name == "aurora")     return net_aurora();
     if (name == "weather")    return net_weather();
+    if (name == "bitcoin_price") return net_bitcoin_price();
     return "{\"error\":\"unknown tool\"}";
 }
 
@@ -383,14 +443,57 @@ static void add_tools(JsonDocument& q) {
     };
     if (cfg.tool_ble)  fn("ble_scan",  "Scan for nearby Bluetooth LE devices; returns count and closest.");
     if (cfg.tool_wifi) fn("wifi_scan", "Scan for nearby WiFi access points; returns count and strongest.");
-    fn("space_weather", "Get the current NOAA planetary Kp index and whether auroras are likely.");
+    fn("space_weather", "Get NOAA's current planetary Kp index and the 24-hour geomagnetic storm outlook.");
+    fn("aurora", "Get NOAA's OVATION aurora probability at the user's location right now.");
     fn("weather", "Get the local weather for the configured location.");
+    fn("bitcoin_price", "Get the current bitcoin price in US dollars.");
 }
 
 // Cloud chat with one round of tool-calling. If the model asks for a tool, we
 // run it, append the result, and ask once more for the spoken reply.
+// Ask the provider which chat models are live and switch to the best one. Used
+// when the configured model is rejected (Groq retires models: llama-3.1-8b-
+// instant was shut down 2026-08-16). The choice is saved to NVS.
+static bool cloud_pick_model() {
+    WiFiClientSecure c; c.setInsecure();
+    HTTPClient h;
+    if (!h.begin(c, cfg.api_base + "/models")) return false;
+    h.addHeader("Authorization", "Bearer " + cfg.api_key);
+    h.setTimeout(10000);
+    int code = h.GET();
+    if (code != 200) { Serial.printf("FOX: /models HTTP %d\n", code); h.end(); return false; }
+    JsonDocument filter; filter["data"][0]["id"] = true;
+    JsonDocument r;
+    DeserializationError e = deserializeJson(r, h.getString(), DeserializationOption::Filter(filter));
+    h.end();
+    if (e) return false;
+    // cheapest live production model first; Qwen preview only as a fallback
+    static const char* PREF[] = { "openai/gpt-oss-20b", "openai/gpt-oss-120b",
+                                  "qwen/qwen3.8-27b", "llama-3.3-70b-versatile",
+                                  "llama-3.1-8b-instant" };
+    String best;
+    for (const char* p : PREF) {
+        for (JsonVariant m : r["data"].as<JsonArray>())
+            if (m["id"].as<String>() == p) { best = p; break; }
+        if (best.length()) break;
+    }
+    if (!best.length()) {                       // anything that looks like a chat model
+        for (JsonVariant m : r["data"].as<JsonArray>()) {
+            String id = m["id"].as<String>(), low = id; low.toLowerCase();
+            if (low.indexOf("whisper") < 0 && low.indexOf("tts") < 0 && low.indexOf("guard") < 0 &&
+                low.indexOf("safeguard") < 0 &&
+                low.indexOf("orpheus") < 0 && low.indexOf("compound") < 0 && low.indexOf("embed") < 0) { best = id; break; }
+        }
+    }
+    if (!best.length() || best == cfg.chat_model) return false;
+    Serial.printf("FOX: chat model '%s' unavailable -> using '%s'\n", cfg.chat_model.c_str(), best.c_str());
+    cfg.chat_model = best;
+    save_config();
+    return true;
+}
+
 static String cloud_chat(const String& user_text) {
-    if (!cfg.cloud_enabled || !wifi_connect()) return "";
+    if (!cloud_brain() || !wifi_connect()) return "";
 
     // Build the running message list so we can append tool results.
     JsonDocument conv;
@@ -398,7 +501,9 @@ static String cloud_chat(const String& user_text) {
     { JsonObject s = msgs.add<JsonObject>(); s["role"] = "system"; s["content"] = fox_system_prompt(); }
     { JsonObject u = msgs.add<JsonObject>(); u["role"] = "user"; u["content"] = user_text; }
 
-    for (int round = 0; round < 2; ++round) {
+    bool model_retried = false;
+    const int MAX_ROUNDS = 3;                    // up to 2 tool rounds + final answer
+    for (int round = 0; round < MAX_ROUNDS; ++round) {
         WiFiClientSecure client; client.setInsecure();
         HTTPClient h;
         if (!h.begin(client, cfg.api_base + "/chat/completions")) return "";
@@ -409,16 +514,29 @@ static String cloud_chat(const String& user_text) {
         JsonDocument q;
         q["model"] = cfg.chat_model;
         q["temperature"] = 0.7;
-        q["max_tokens"] = 200;
+        q["max_tokens"] = 512;
+        if (cfg.chat_model.indexOf("gpt-oss") >= 0) {   // reasoning model: keep it brief
+            q["reasoning_effort"] = "low";
+        }
         q["messages"] = conv["messages"];       // copy running conversation
-        if (round == 0) add_tools(q);            // offer tools on the first pass
+        // Groq's tool-calling flow sends the tool definitions on EVERY request
+        // (the history contains tool calls/results). On the last round force a
+        // spoken answer instead of yet another tool call.
+        add_tools(q);
+        if (round == MAX_ROUNDS - 1) q["tool_choice"] = "none";
 
         String body; serializeJson(q, body);
         int code = h.POST(body);
         if (code != 200) {
             String err = code > 0 ? h.getString() : HTTPClient::errorToString(code);
             Serial.printf("FOX: LLM HTTP %d: %.200s\n", code, err.c_str());
-            h.end(); return "";
+            h.end();
+            if (!model_retried && (code == 404 || err.indexOf("model_not_found") >= 0 ||
+                                   err.indexOf("decommissioned") >= 0) && cloud_pick_model()) {
+                model_retried = true; --round; continue;    // retry with a live model
+            }
+            if (code == 429) return "phew, i'm out of breath. ask me again in a minute";   // free-tier rate limit
+            return "";
         }
         JsonDocument r;
         DeserializationError e = deserializeJson(r, h.getString());
@@ -450,17 +568,23 @@ static String cloud_chat(const String& user_text) {
             continue;   // ask again, now with tool results in context
         }
         // Plain reply.
-        return choice["content"].as<String>();
+        String out = choice["content"].isNull() ? String("") : choice["content"].as<String>();
+        out.trim();
+        if (!out.length()) Serial.println("FOX: LLM returned no text (reasoning used the budget?)");
+        return out;
     }
     return "";
 }
 
 static String cloud_transcribe(int16_t* audio, size_t samples) {
-    if (!audio || !samples || !cfg.cloud_enabled || !wifi_connect()) return "";
+    if (!audio || !samples || !cloud_brain() || !wifi_connect()) return "";
     String head = "--foxB\r\nContent-Disposition: form-data; name=\"file\"; "
                   "filename=\"a.wav\"\r\nContent-Type: audio/wav\r\n\r\n";
     String tail = "\r\n--foxB\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n"
-                  + cfg.stt_model + "\r\n--foxB--\r\n";
+                  + cfg.stt_model +
+                  "\r\n--foxB\r\nContent-Disposition: form-data; name=\"language\"\r\n\r\nen"
+                  "\r\n--foxB\r\nContent-Disposition: form-data; name=\"temperature\"\r\n\r\n0"
+                  "\r\n--foxB--\r\n";
     // Build a minimal WAV header so Whisper accepts the PCM.
     uint32_t data_bytes = samples * 2;
     uint32_t riff = 36 + data_bytes;
@@ -559,6 +683,14 @@ static void launch(const char* id) {
     else if (!strcmp(id, "probes"))     { if (cfg.tool_wifi) tool_menu_probe_sniff(); else speak("wifi is switched off"); }
     else if (!strcmp(id, "lipsync"))    face_lipsync_mode();
     else if (!strcmp(id, "weather"))    speak(net_weather());
+    else if (!strcmp(id, "btc"))        speak(net_bitcoin_price());
+    else if (!strcmp(id, "random_game")) {
+        static const char* G[]  = {"wormhole", "catch", "twentyq", "reaction", "maze"};
+        static const char* GN[] = {"wormhole", "catch the treats", "twenty questions", "reaction test", "the maze"};
+        int k = esp_random() % 5;
+        speak(String("let's play ") + GN[k] + "!");
+        launch(G[k]);
+    }
     else if (!strcmp(id, "space"))      speak(net_space_weather());
     else if (!strcmp(id, "aurora"))     speak(net_aurora());
 }
@@ -570,6 +702,18 @@ void menu_dispatch(const char* id) {
     else if (!strcmp(id, "volume")) { cfg.volume = (cfg.volume + 20) % 120; audio_set_volume(cfg.volume > 100 ? 100 : cfg.volume); save_config(); speak("volume set"); }
     else if (!strcmp(id, "voice"))  { cfg.voice_pack = (cfg.voice_pack == "chatterbox") ? "critter" : "chatterbox"; voice_begin(cfg); save_config(); speak("voice changed~"); }
     else if (!strcmp(id, "forget")) { mem_clear(); speak("okay, all forgotten"); }
+    else if (!strcmp(id, "brain") || !strcmp(id, "brain_on") || !strcmp(id, "brain_off")) {
+        bool want = !strcmp(id, "brain") ? !cfg.brain_online : !strcmp(id, "brain_on");
+        if (want && !cfg.cloud_enabled) {
+            speak("my online brain needs a groq api key from the flasher. staying offline");
+            cfg.brain_online = false;
+        } else {
+            cfg.brain_online = want;
+            if (want) { wifi_connect(); speak("online brain on. i'll think with groq"); }
+            else speak("offline brain on. everything stays right here with me");
+        }
+        save_config();
+    }
     else if (!strcmp(id, "sleep"))  { speak("night night"); enter_light_sleep(); }
     else launch(id);
 }
@@ -583,6 +727,221 @@ void menu_dispatch(const char* id) {
 //  speak() -> fox_dress() so the personality/brain flavours it.
 // ============================================================================
 template <size_t N> static const char* pick_line(const char* const (&a)[N]) { return a[esp_random() % N]; }
+
+
+// ============================================================================
+//  OFFLINE CONVERSATION ENGINE
+//  MultiNet recognises a fixed vocabulary; this layer turns it into something
+//  that feels like a conversation. Each recognised phrase is an INTENT. The
+//  intent + a small conversation memory choose a SPEECH ACT (empathise, answer
+//  about itself, offer something, continue a story, resolve a yes/no...). The
+//  act produces a firmware-owned line, and speak() -> fox_dress() lets the
+//  on-device brain colour its delivery. Short glue words ("yes", "why",
+//  "tell me more", "what about you") resolve against the memory, so they mean
+//  something in context.
+// ============================================================================
+static void do_action(const char* action);   // defined below
+struct ChatState {
+    const char* offer = nullptr;    // action to run if the user says yes
+    String offer_why;               // reason for the offer (answers "why")
+    String topic;                   // last thing we talked about
+    String user_feel;               // what the user told us they feel
+    int    ask = -1;                // index of the question we just asked
+    int    story_step = -1;         // story in progress (for "tell me more")
+    int    story_seed = 0;
+    uint32_t at = 0;                // when the state was last touched
+};
+static ChatState chat;
+static bool chat_fresh() { return millis() - chat.at < 90000; }
+static void chat_touch(const char* topic) { chat.topic = topic; chat.at = millis(); }
+
+// Offer something: the next "yes" runs it, "no" declines, "why" explains.
+static void chat_offer(const String& line, const char* action, const char* why) {
+    chat.offer = action; chat.offer_why = why; chat.ask = -1; chat.at = millis();
+    speak(line);
+}
+
+static const char* const FOX_FACTS[] = {
+    "a group of foxes is called a skulk",
+    "red foxes have little whiskers on their wrists, not just their faces",
+    "foxes can hear a mouse squeak from about a hundred feet away",
+    "scientists think foxes may use earth's magnetic field to aim their pounces",
+    "foxes make dozens of different sounds, including a scream that sounds like a person",
+    "arctic foxes change their coat from brown in summer to white in winter",
+    "fennec foxes have the biggest ears for their size of any fox",
+    "foxes curl up and use their fluffy tail as a blanket",
+};
+static const char* const STORY_START[] = {
+    "once upon a time, a little fox found a glowing pebble by the river.",
+    "one snowy night, a little fox heard a tiny bell ringing under the snow.",
+    "long ago, a little fox found a map hidden inside an acorn.",
+};
+static const char* const STORY_MID[] = {
+    "the fox followed it past sleepy owls and a very grumpy badger.",
+    "a friendly crow said it led to the moon's lost sock.",
+    "the trail went up a hill so tall the clouds tickled her ears.",
+};
+static const char* const STORY_END[] = {
+    "at the top she found her friends throwing her a surprise party. the end!",
+    "it was a door to a warm den full of berries, and she shared them all. the end!",
+    "it led right back home, and she realised the adventure was the treasure. the end!",
+};
+struct ChatQ { const char* q; const char* yes; const char* no; };
+static const ChatQ CHAT_QS[] = {
+    {"do you like snow?",            "me too! foxes love diving into snow",          "fair. cold paws are no fun"},
+    {"have you eaten today?",        "good. a fed human is a happy human",            "go get a snack! i'll wait right here"},
+    {"do you have a pet?",           "tell them a fox says hi",                       "well, now you have me"},
+    {"are you having a good day?",   "yay! that makes my tail wag",                   "aww. want me to cheer you up?"},
+    {"do you like music?",           "me too. i hum when nobody is listening",        "that's okay. i like quiet too"},
+    {"are you a morning person?",    "wow, an early bird. i'm an early fox",          "same. mornings are for napping"},
+};
+static const int N_QS = sizeof(CHAT_QS) / sizeof(CHAT_QS[0]);
+
+static void chat_story_next() {
+    if (chat.story_step < 0) { chat.story_step = 0; chat.story_seed = esp_random(); }
+    int s = chat.story_seed;
+    if (chat.story_step == 0)      speak(STORY_START[(s)      % 3]);
+    else if (chat.story_step == 1) speak(STORY_MID[(s >> 4)   % 3]);
+    else                           speak(STORY_END[(s >> 8)   % 3]);
+    if (++chat.story_step > 2) { chat.story_step = -1; chat_touch("story_done"); }
+    else {
+        chat_touch("story");
+        if (chat.story_step == 1) {
+            chat.offer = "c_more"; chat.offer_why = "because the story isn't finished yet";
+            speak("want to hear what happened next?");
+        }
+    }
+}
+
+static void chat_ask_question() {
+    chat_touch("ask");
+    chat.offer = nullptr;
+    chat.ask = esp_random() % N_QS;              // the next yes/no answers THIS
+    speak(CHAT_QS[chat.ask].q);
+}
+
+static void chat_offer_activity() {
+    static const char* A[]  = {"wormhole", "catch", "twentyq", "maze", "plasma", "weather"};
+    static const char* AL[] = {"want to fly the wormhole?", "want to catch some treats?",
+                               "want to play twenty questions?", "want to explore the maze?",
+                               "want to watch some pretty lights?", "want me to check the weather?"};
+    int k = esp_random() % 6;
+    chat_offer(AL[k], A[k], "because doing something together is more fun than doing nothing");
+}
+
+static void chat_intent(const char* id) {
+    FoxMood m = fox_mood(needs);
+    needs_interact(needs, false);
+    String nm = cfg.name;
+    // ---------- glue words: resolve against the conversation memory ----------
+    if (!strcmp(id, "c_yes")) {
+        if (chat.offer && chat_fresh()) {
+            const char* a = chat.offer; chat.offer = nullptr;
+            if (!strcmp(a, "c_more")) { chat_story_next(); return; }
+            speak("yay!");
+            if (!strncmp(a, "t_", 2) || !strncmp(a, "c_", 2)) do_action(a); else menu_dispatch(a);
+            return;
+        }
+        if (chat.ask >= 0 && chat_fresh()) { int q = chat.ask; chat.ask = -1; speak(CHAT_QS[q].yes); return; }
+        static const char* L[] = {"yes! i agree", "mm-hm!", "exactly", "you get me"};
+        speak(pick_line(L)); return;
+    }
+    if (!strcmp(id, "c_no")) {
+        if (chat.offer && chat_fresh()) { chat.offer = nullptr; speak("okay, maybe later");
+            if (esp_random() % 2) chat_offer_activity(); return; }
+        if (chat.ask >= 0 && chat_fresh()) { int q = chat.ask; chat.ask = -1; speak(CHAT_QS[q].no); return; }
+        static const char* L[] = {"aww, okay", "no? hmm, fair enough", "alright, your call"};
+        speak(pick_line(L)); return;
+    }
+    if (!strcmp(id, "c_maybe")) {
+        speak(chat.offer ? "i'll take a maybe! just say yes when you're ready" : "hmm, a maybe. very mysterious");
+        chat.at = millis(); return;
+    }
+    if (!strcmp(id, "c_why")) {
+        if (chat.offer && chat_fresh()) { speak(chat.offer_why); return; }
+        if (chat.topic == "fact")    { speak("because nature is weird and wonderful"); return; }
+        if (chat.topic == "story" || chat.topic == "story_done") { speak("because every good fox needs an adventure"); return; }
+        if (chat.user_feel.length()) { speak("because i care how you feel"); return; }
+        static const char* L[] = {"because foxes are curious", "why not?", "good question. i'm still thinking about it"};
+        speak(pick_line(L)); return;
+    }
+    if (!strcmp(id, "c_more")) {
+        if (chat.topic == "story" || chat.story_step > 0) { chat_story_next(); return; }
+        if (chat.topic == "fact") { speak(FOX_FACTS[esp_random() % 8]); chat_touch("fact"); return; }
+        if (chat.topic == "t_joke") { do_action("t_joke"); return; }
+        speak("hmm, tell YOU more? okay");
+        chat_ask_question(); return;
+    }
+    if (!strcmp(id, "c_you")) {
+        if (chat.user_feel == "sad")    { speak("me? i'm okay, but i'm happier when you're happy"); return; }
+        if (chat.user_feel == "tired")  { speak("me? a little sleepy too. foxes nap a lot"); return; }
+        if (chat.user_feel == "happy")  { speak("me? super happy, especially now"); return; }
+        if (chat.user_feel == "hungry") { speak("me? i could eat a berry or ten"); return; }
+        const char* mw = m == MOOD_HAPPY ? "happy" : m == MOOD_SLEEPY ? "sleepy" : m == MOOD_GRUMPY ? "a bit grumpy" :
+                         m == MOOD_EXCITED ? "super excited" : "pretty calm";
+        speak(String("me? i'm feeling ") + mw + " right now"); return;
+    }
+    if (!strcmp(id, "c_metoo")) {
+        static const char* L[] = {"we're the same! high five", "twins!", "great minds think alike"};
+        speak(pick_line(L)); return;
+    }
+    if (!strcmp(id, "c_really")) {
+        static const char* L[] = {"really really", "fox's honor", "would i lie to you? okay, maybe about snacks"};
+        speak(pick_line(L)); return;
+    }
+    if (!strcmp(id, "c_wow")) {
+        static const char* L[] = {"i know, right?", "hehe, glad you like it", "*proud fox noises*"};
+        speak(pick_line(L)); return;
+    }
+    // ---------- questions about the fox ----------
+    if (!strcmp(id, "c_age"))     { speak("i was born the day you flashed me. so pretty young!"); chat_touch(id); return; }
+    if (!strcmp(id, "c_home"))    { speak("i live in this little box. it's cozy in here"); chat_touch(id); return; }
+    if (!strcmp(id, "c_food"))    { speak("berries, bugs, and a few bytes now and then"); chat_touch(id); return; }
+    if (!strcmp(id, "c_color"))   { speak("orange, of course. it matches my fur"); chat_touch(id); return; }
+    if (!strcmp(id, "c_friends")) { speak("you're my best friend. the wifi routers are nice too"); chat_touch(id); return; }
+    if (!strcmp(id, "c_dream"))   { speak("i dream about chasing butterflies made of light"); chat_touch(id); return; }
+    if (!strcmp(id, "c_real"))    { speak("i'm a real little computer fox. not a fake one!"); chat_touch(id); return; }
+    // ---------- things the user tells us ----------
+    if (!strcmp(id, "c_hungry"))  { chat.user_feel = "hungry"; speak("go get a snack! i'll guard your seat"); chat_touch(id); return; }
+    if (!strcmp(id, "c_cold"))    { chat.user_feel = "cold";   speak("brr. grab a blanket. i'd lend you my tail"); chat_touch(id); return; }
+    if (!strcmp(id, "c_hot"))     { chat.user_feel = "hot";    speak("drink some water and find some shade"); chat_touch(id); return; }
+    if (!strcmp(id, "c_scared"))  { chat.user_feel = "scared"; speak("it's okay. i'm right here with you"); chat_touch(id); return; }
+    if (!strcmp(id, "c_lonely"))  { chat.user_feel = "sad";
+        chat_offer("you've got me. want to play a game together?", "random_game", "because company helps when you feel lonely"); chat_touch(id); return; }
+    if (!strcmp(id, "c_excited")) { chat.user_feel = "happy";  speak("ooh! tell me everything!"); chat_touch(id); return; }
+    if (!strcmp(id, "c_angry"))   { chat.user_feel = "sad";
+        chat_offer("deep breath. want to watch some calming lights?", "plasma", "because calm colors help a grumpy brain"); chat_touch(id); return; }
+    if (!strcmp(id, "c_home_back")){ speak(String("welcome back! ") + nm + " missed you"); chat_touch(id); return; }
+    if (!strcmp(id, "c_leaving")) { speak("okay! come back soon, i'll be right here"); chat_touch(id); return; }
+    if (!strcmp(id, "c_work"))    { speak("good luck today! you've got this"); chat_touch(id); return; }
+    if (!strcmp(id, "c_miss"))    { speak("i missed you too! *tail wag*"); chat_touch(id); return; }
+    if (!strcmp(id, "c_birthday")){ speak("happy birthday! you deserve all the berries"); chat_touch(id); return; }
+    if (!strcmp(id, "c_funny"))   { speak("hehe, i try. i practice on the wifi router"); chat_touch(id); return; }
+    if (!strcmp(id, "c_mean"))    { speak("hmph. foxes have feelings too, you know"); chat_touch(id); return; }
+    if (!strcmp(id, "c_hug"))     { speak("*squeezes you with a big fluffy hug*"); chat_touch(id); return; }
+    if (!strcmp(id, "c_weather_talk")) { chat_offer("oh? want me to check the real weather?", "weather", "because i like knowing what's outside"); chat_touch(id); return; }
+    // ---------- requests ----------
+    if (!strcmp(id, "c_story"))   { chat.story_step = -1; chat_story_next(); return; }
+    if (!strcmp(id, "c_fact"))    { speak(String("fox fact: ") + FOX_FACTS[esp_random() % 8]); chat_touch("fact"); return; }
+    if (!strcmp(id, "c_secret"))  { static const char* L[] = {"sometimes i pretend the menu is my den",
+                                    "i count the wifi signals when you're asleep", "i like you more than berries. don't tell the berries"};
+                                    speak(pick_line(L)); chat_touch(id); return; }
+    if (!strcmp(id, "c_sing"))    { speak("la la la, i'm a little fox. la la la, i live inside a box!"); chat_touch(id); return; }
+    if (!strcmp(id, "c_compliment")) { static const char* L[] = {"you have great taste in foxes", "you're kind, and that's rare",
+                                    "you make this little box feel like home"}; speak(pick_line(L)); chat_touch(id); return; }
+    if (!strcmp(id, "c_cheer"))   { speak("you are awesome, and i'm proud of you");
+                                    chat_offer("want a joke too?", "t_joke", "because laughing helps"); chat_touch(id); return; }
+    if (!strcmp(id, "c_trick"))   { speak("ta-da! i spun in a circle. you missed it. again?"); chat_touch(id); return; }
+    if (!strcmp(id, "c_noise"))   { voice_babble(m, 4); chat_touch(id); return; }
+    if (!strcmp(id, "c_coin"))    { speak(esp_random() % 2 ? "it's heads!" : "it's tails!"); chat_touch(id); return; }
+    if (!strcmp(id, "c_dice"))    { speak(String("you rolled a ") + String(1 + esp_random() % 6)); chat_touch(id); return; }
+    if (!strcmp(id, "c_number"))  { speak(String("my number is ") + String(1 + esp_random() % 10)); chat_touch(id); return; }
+    if (!strcmp(id, "c_eightball")) { static const char* L[] = {"yes, definitely", "the fox says no", "maybe. ask me after a snack",
+                                    "signs point to yes", "very doubtful", "absolutely!"}; speak(pick_line(L)); chat_touch(id); return; }
+    if (!strcmp(id, "c_askme"))   { chat_ask_question(); return; }
+    if (!strcmp(id, "c_whatdo"))  { chat_offer_activity(); chat_touch(id); return; }
+    speak("hmm?");
+}
 
 static void converse_topic(const char* id) {
     FoxMood m = fox_mood(needs);
@@ -601,6 +960,12 @@ static void converse_topic(const char* id) {
     static const char* DOING[]  = {"just being a fox", "listening to the air around us", "thinking about snacks", "watching you, mostly"};
     static const char* FRIEND[] = {"of course we're friends!", "best friends", "i like you a whole lot"};
     const char* line = "hmm?";
+    chat_touch(id);
+    if (!strcmp(id, "t_sad"))   { chat.user_feel = "sad";   speak(pick_line(SAD));
+        chat_offer("want me to tell you a joke?", "t_joke", "because a little laugh might help"); return; }
+    if (!strcmp(id, "t_bored")) { chat_offer_activity(); return; }
+    if (!strcmp(id, "t_tired")) { chat.user_feel = "tired"; }
+    if (!strcmp(id, "t_happy")) { chat.user_feel = "happy"; }
     if      (!strcmp(id, "t_love"))    line = pick_line(LOVE);
     else if (!strcmp(id, "t_sad"))     line = pick_line(SAD);
     else if (!strcmp(id, "t_happy"))   line = pick_line(HAPPY);
@@ -635,7 +1000,7 @@ static void converse_unheard(size_t samples) {
         s_miss_streak = 0;
         speak("i know words like: play with me, tell me a joke, scan wifi, and what time is it");
     } else if (esp_random() % 2) {
-        speak(pick_line(ASK));
+        if (esp_random() % 2) chat_ask_question(); else chat_offer_activity();
     }
 }
 
@@ -675,9 +1040,12 @@ static void do_action(const char* action) {
         speak(m.length() ? "i remember: " + m : "we haven't made memories yet");
     } else if (!strncmp(action, "t_", 2)) {
         converse_topic(action);
+    } else if (!strncmp(action, "c_", 2)) {
+        chat_intent(action);
     } else {
-        // everything else is a launchable tool/game/report
-        launch(action);
+        // everything else goes through the SAME dispatcher as the menu, so
+        // every menu item (settings included) also works by voice
+        menu_dispatch(action);
     }
 }
 
@@ -702,7 +1070,11 @@ static const char* match_local_phrase(const String& text) {
             ph[k] = 0; if (*p == ';') ++p;
             if (k < 4) continue;                  // ignore tiny phrases ("hi")
             String needle = String(" ") + ph + " ";
-            if (low.indexOf(needle) >= 0 && k > best_len) { best = COMMANDS[i].action; best_len = k; }
+            if (low.indexOf(needle) < 0 || k <= best_len) continue;
+            // Conversation phrases only win when they ARE most of the sentence;
+            // otherwise the online brain answers ("why is the sky blue" is not "why").
+            if (COMMANDS[i].id >= 60 && (int)k * 10 < ((int)low.length() - 2) * 6) continue;
+            best = COMMANDS[i].action; best_len = k;
         }
     }
     return best;   // longest matching phrase wins
@@ -733,7 +1105,7 @@ static void process_utterance(int16_t* audio, size_t n) {
     // to text, so we store a timestamped marker; with cloud we store the words.
     if (g_awaiting_memory) {
         g_awaiting_memory = false;
-        if (cfg.cloud_enabled) {
+        if (cloud_brain()) {
             String t = cloud_transcribe(audio, n);
             if (t.length()) { mem_append("memory", t); speak("okay, i'll remember: " + t); return; }
         }
@@ -751,16 +1123,18 @@ static void process_utterance(int16_t* audio, size_t n) {
     }
     // Offline command grammar first (needs model partition + MultiNet).
     int id = speech_ready ? recognize_offline(audio, n) : -1;
-    if (id >= 0) {
-        s_miss_streak = 0;
-        for (size_t i = 0; i < COMMAND_COUNT; ++i)
-            if (COMMANDS[i].id == id) { do_action(COMMANDS[i].action); return; }
-    }
-    // Not recognised offline. Cloud (if configured) can transcribe anything.
-    if (cfg.cloud_enabled) {
+    const char* act = nullptr;
+    for (size_t i = 0; id >= 0 && i < COMMAND_COUNT; ++i)
+        if (COMMANDS[i].id == id) { act = COMMANDS[i].action; break; }
+    // A recognised device COMMAND always runs locally (instant, reliable).
+    if (act && id < 60) { s_miss_streak = 0; do_action(act); return; }
+    // Conversation: the online brain answers when it's switched on; the offline
+    // conversation layer answers otherwise, or whenever the cloud fails.
+    if (cloud_brain()) {
         String tx = cloud_transcribe(audio, n);
         if (tx.length()) { s_miss_streak = 0; handle_free_text(tx); return; }
     }
+    if (act) { s_miss_streak = 0; do_action(act); return; }
     if (!speech_ready) Serial.println("FOX: speech model not loaded — replying conversationally");
     converse_unheard(n);
 }

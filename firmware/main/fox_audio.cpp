@@ -54,6 +54,13 @@ void audio_set_volume(uint8_t volume) {
     set_mute(volume == 0);
 }
 
+// Speech capture runs the mic 6 dB lower than puppet/lip-sync mode: at +6 dB
+// normal speech clipped (peak=32768, avg~7000), which ruins recognition.
+void audio_mic_speech_gain(bool speech) {
+    if (!g_echo_ok) return;
+    g_echo.setMicGain(speech ? ES8311_MIC_GAIN_0DB : ES8311_MIC_GAIN_6DB);
+}
+
 void audio_speaker_end() {
     set_mute(true);   // amp off while listening (no feedback / hiss)
 }

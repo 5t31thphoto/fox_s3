@@ -106,13 +106,16 @@ static bool pico_say(const String& text) {
     picotts_add(t.c_str(), t.length() + 1);      // include the \0: "go"
     uint32_t guard = millis(), budget = 4000 + t.length() * 150;
     while (!s_tts_done && millis() - guard < budget) {
-        M5.update(); face_draw(g_speaking_mood); delay(20);
+        M5.update(); face_draw(g_speaking_mood); delay(40);
     }
     while (audio_is_playing()) { M5.update(); delay(5); }
     face_set_mouth(0); face_draw(g_speaking_mood);
     if (s_tts_err || !s_tts_done) {
         Serial.println("FOX: PicoTTS error/timeout — SAM fallback for this line");
-        if (s_tts_err) { picotts_shutdown(); s_pico_up = false; }   // re-init next time
+        // Stop PicoTTS before SAM takes over: if it is still synthesizing on its
+        // own task, both engines would write the I2S port (and the shared
+        // stereo buffer) at once. Re-initialised on the next line.
+        picotts_shutdown(); s_pico_up = false;
         return false;
     }
     return true;

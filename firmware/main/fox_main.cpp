@@ -30,6 +30,7 @@
 #include <esp_log.h>
 #include <esp_partition.h>
 #include <math.h>
+#include <ctype.h>
 
 // esp-sr (offline speech)
 #include <esp_mn_iface.h>
@@ -137,7 +138,7 @@ static const Command COMMANDS[] = {
     {1,  "hello fox;hey fox;hi fox;hello;hi there",           "greet"},
     {2,  "what time is it;tell me the time;what is the time", "time"},
     {3,  "how are you;how do you feel;are you okay",          "mood"},
-    {4,  "what is the weather;weather report;is it raining",  "weather"},
+    {4,  "what is the weather;weather report;is it raining;tell me the weather;how is the weather", "weather"},
     {6,  "volume up;louder;speak up",                         "vol_up"},
     {7,  "volume down;quieter;be quiet",                      "vol_dn"},
     {8,  "go to sleep;good night;time for bed",               "sleep"},
@@ -147,7 +148,7 @@ static const Command COMMANDS[] = {
     {12, "open the menu;show menu;show me the menu",          "menu"},
     {13, "scan for devices;bluetooth radar;find bluetooth",   "ble_radar"},
     {14, "scan wifi;wifi radar;find wifi",                    "wifi_radar"},
-    {15, "sniff packets;sniffer mode;hunt mode",              "sniffer"},
+    {15, "sniff packets;sniffer mode;hunt mode;pwnagotchi",   "sniffer"},
     {16, "play wormhole;fly the ship",                        "wormhole"},
     {17, "catch the treats;catch game",                       "catch"},
     {18, "twenty questions;guess my thing",                   "twentyq"},
@@ -168,7 +169,7 @@ static const Command COMMANDS[] = {
     {61, "i am sad;i feel sad;bad day;i am upset",            "t_sad"},
     {62, "i am happy;good day;i feel great",                  "t_happy"},
     {63, "i am tired;so tired;i am sleepy",                   "t_tired"},
-    {64, "tell me a joke;make me laugh;say something funny",  "t_joke"},
+    {64, "tell me a joke;make me laugh;say something funny;tell me something funny", "t_joke"},
     {65, "thank you;thanks fox;thanks",                       "t_thanks"},
     {66, "sorry;i am sorry",                                  "t_sorry"},
     {67, "good morning;morning fox",                          "t_morning"},
@@ -414,11 +415,15 @@ static String cloud_chat(const String& user_text) {
 
         String body; serializeJson(q, body);
         int code = h.POST(body);
-        if (code != 200) { h.end(); return ""; }
+        if (code != 200) {
+            String err = code > 0 ? h.getString() : HTTPClient::errorToString(code);
+            Serial.printf("FOX: LLM HTTP %d: %.200s\n", code, err.c_str());
+            h.end(); return "";
+        }
         JsonDocument r;
         DeserializationError e = deserializeJson(r, h.getString());
         h.end();
-        if (e) return "";
+        if (e) { Serial.printf("FOX: LLM reply not JSON (%s)\n", e.c_str()); return ""; }
 
         JsonObject choice = r["choices"][0]["message"];
         // If the model requested tool calls, run them and loop once more.
@@ -482,15 +487,20 @@ static String cloud_transcribe(int16_t* audio, size_t samples) {
     if (!h.begin(client, cfg.api_base + "/audio/transcriptions")) { free(buf); return ""; }
     h.addHeader("Authorization", "Bearer " + cfg.api_key);
     h.addHeader("Content-Type", "multipart/form-data; boundary=foxB");
+    h.setTimeout(20000);                       // several seconds of audio upload
     int code = h.POST(buf, total);
     String out;
     if (code == 200) {
         JsonDocument r;
         if (deserializeJson(r, h.getString()) == DeserializationError::Ok)
             out = r["text"].as<String>();
+    } else {
+        String err = code > 0 ? h.getString() : HTTPClient::errorToString(code);
+        Serial.printf("FOX: STT HTTP %d: %.200s\n", code, err.c_str());
     }
     h.end(); free(buf);
     out.trim();
+    Serial.printf("FOX: STT heard \"%s\"\n", out.c_str());
     return out;
 }
 
@@ -505,6 +515,7 @@ static String cloud_transcribe(int16_t* audio, size_t samples) {
 #include "fox_encounter.inc" // fox encounters + roguelike maze
 #include "fox_markov.inc" // Markov idle chatter + pwnagotchi RF mood
 #include "fox_net.inc"    // weather, space weather, aurora
+static void fox_backlight(uint8_t brightness);   // defined below
 #include "fox_input.inc"  // PTT capture, IMU flick-menu, USB config, sleep
 
 // ============================================================================
@@ -671,9 +682,40 @@ static void do_action(const char* action) {
 }
 
 // Turn a transcript into a reply. Cloud if available, else reflection/templates.
+// Does the transcript contain one of the fox's own phrases? Then do it locally
+// (reliable, instant, works with the real tools) instead of asking the LLM.
+static const char* match_local_phrase(const String& text) {
+    String low; low.reserve(text.length());
+    for (size_t i = 0; i < text.length(); ++i) {
+        char c = tolower((unsigned char)text[i]);
+        if (isalnum((unsigned char)c) || c == ' ') low += c;
+        else if (c == '\'') continue;            // "what's" -> "whats"
+        else low += ' ';
+    }
+    low = " " + low + " ";
+    const char* best = nullptr; size_t best_len = 0;
+    for (size_t i = 0; i < COMMAND_COUNT; ++i) {
+        const char* p = COMMANDS[i].phrases;
+        while (*p) {
+            char ph[64]; size_t k = 0;
+            while (*p && *p != ';' && k < sizeof(ph) - 1) ph[k++] = *p++;
+            ph[k] = 0; if (*p == ';') ++p;
+            if (k < 4) continue;                  // ignore tiny phrases ("hi")
+            String needle = String(" ") + ph + " ";
+            if (low.indexOf(needle) >= 0 && k > best_len) { best = COMMANDS[i].action; best_len = k; }
+        }
+    }
+    return best;   // longest matching phrase wins
+}
+
 static void handle_free_text(const String& text) {
     if (!text.length()) { speak(fox_idle_line(fox_mood(needs))); return; }
     if (cfg.persistence) mem_append("you", text);
+    if (const char* act = match_local_phrase(text)) {
+        Serial.printf("FOX: transcript matched local action '%s'\n", act);
+        do_action(act);
+        return;
+    }
     String reply = cloud_chat(text);
     if (!reply.length()) {
         String low = text; low.toLowerCase();
@@ -844,7 +886,6 @@ void loop() {
     input_poll();          // handles USB serial config + IMU wake
     face_tick(fox_mood(needs));
 
-    uint32_t now = millis();
 
     // --- Button: HOLD = talk, DOUBLE = menu, single TAP = pet/boop ---------
     ButtonEvent ev = input_button_event();
@@ -868,7 +909,7 @@ void loop() {
     }
 
     // If a game/tool/toy asked to bail to the menu (double-click), do it now.
-    if (g_goto_menu) { g_goto_menu = false; open_menu(); last_activity = now; }
+    if (g_goto_menu) { g_goto_menu = false; open_menu(); last_activity = millis(); }
 
     // --- Conversation mode: listen in bursts, time out on silence ---------
     if (cfg.conversation) {
@@ -877,7 +918,7 @@ void loop() {
         if (audio && n > SAMPLE_RATE / 3) {
             face_think();
             process_utterance(audio, n);
-            last_activity = now;
+            last_activity = millis();
         } else {
             cfg.conversation = false;   // silence timeout ends conversation mode
             speak("okay, i'll be here if you need me~");
@@ -887,11 +928,16 @@ void loop() {
 
     // --- IMU gestures (tap to interact, shake to play) --------------------
     Gesture g = input_gesture();
-    if (g == GST_TAP)   { needs_interact(needs, false); speak("boop!"); last_activity = now; }
-    if (g == GST_SHAKE) { needs_interact(needs, true);  speak("wheee!"); last_activity = now; }
+    if (g == GST_TAP)   { needs_interact(needs, false); speak("boop!"); last_activity = millis(); }
+    if (g == GST_SHAKE) { needs_interact(needs, true);  speak("wheee!"); last_activity = millis(); }
 
     // --- Idle chatter (fidgety companion) ---------------------------------
-    if (now - last_activity > 20000 && now - last_idle_chatter > 45000) {
+    // Elapsed times are taken FRESH here. `now` was read at the top of loop()
+    // and any action above can take seconds and set last_activity = millis()
+    // later than `now`; `now - last_activity` then wraps (unsigned) to ~4e9 and
+    // looked like "idle for ages" -> chatter/sleep fired right after every action.
+    const uint32_t idle_ms = millis() - last_activity;
+    if (idle_ms > 20000 && millis() - last_idle_chatter > 45000) {
         FoxMood m = fox_mood(needs);
         // Markov-generated line for variety. The fox has a real voice now, so
         // it SAYS the line (caption = exactly the words spoken).
@@ -907,11 +953,8 @@ void loop() {
         if (rf.length()) { face_caption(rf); voice_say(rf, fox_mood(needs)); }
     }
 
-    // --- Sleep when idle a long time --------------------------------------
-    if (now - last_activity > IDLE_SLEEP_MS) {
-        enter_light_sleep();
-        last_activity = millis();
-    }
+    // No automatic sleep: the fox only naps when you ask it to (menu "sleep" /
+    // "go to sleep"). See enter_light_sleep().
 
     delay(10);   // nap between frames to save power
 }

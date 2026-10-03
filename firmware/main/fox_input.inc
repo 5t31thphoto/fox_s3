@@ -19,16 +19,22 @@ void input_begin() {
 }
 
 ButtonEvent input_button_event() {
-    static bool     down_prev   = false;
+    static bool     raw_prev    = false;     // debouncer
+    static uint32_t raw_t       = 0;
+    static bool     down_prev   = false;     // debounced state
     static uint32_t down_at     = 0;
     static uint32_t up_at       = 0;
     static uint8_t  taps        = 0;
     static bool     hold_fired  = false;
-    bool down = digitalRead((int)USER_GPIO) == LOW;
     uint32_t now = millis();
+    // A level only counts once it has been stable for BTN_DEBOUNCE_MS, so a
+    // contact bounce can never be seen as an extra press/release (which would
+    // turn one click into a "double-click").
+    bool raw = digitalRead((int)USER_GPIO) == LOW;
+    if (raw != raw_prev) { raw_prev = raw; raw_t = now; }
+    bool down = (now - raw_t >= BTN_DEBOUNCE_MS) ? raw : down_prev;
 
     if (down && !down_prev) {                       // press
-        if (now - up_at < BTN_DEBOUNCE_MS) { down_prev = down; return BTN_NONE; }
         down_at = now; hold_fired = false;
     }
     if (down && !hold_fired && now - down_at > PTT_MIN_MS) {
@@ -38,9 +44,7 @@ ButtonEvent input_button_event() {
     }
     if (!down && down_prev) {                       // release
         up_at = now;
-        if (!hold_fired && now - down_at >= BTN_DEBOUNCE_MS) {
-            if (++taps >= 2) { taps = 0; down_prev = down; return BTN_DOUBLE; }
-        }
+        if (!hold_fired && ++taps >= 2) { taps = 0; down_prev = down; return BTN_DOUBLE; }
     }
     down_prev = down;
     if (!down && taps == 1 && now - up_at > BTN_DOUBLE_GAP_MS) {
@@ -174,21 +178,29 @@ static bool imu_picked_up() {
 // would sleep forever. We instead use *light* sleep with a GPIO wake source,
 // which works on any GPIO, and also wake on a timer to check the IMU.
 void enter_light_sleep() {
-    // Light sleep stops the USB PHY clock: the USB-serial link to the computer
-    // (web flasher / config) would drop. Never nap while a host is connected.
-    if ((bool)Serial) { face_caption("*yawns*"); return; }
+    // A real, recoverable NAP. No esp_light_sleep: light sleep isolates every
+    // GPIO (see boot log "sleep_gpio: isolate all GPIO pins"), which cuts the
+    // LCD's control lines -> the panel blanks and nothing re-initialises it,
+    // and it also drops the USB link. Instead: panel to sleep, backlight off,
+    // amp off, then poll the button / IMU slowly until woken.
     face_caption("*curls up*");
-    face_dim();
+    face_tick(MOOD_SLEEPY);
+    delay(600);
     audio_speaker_end(); audio_mic_end();
-    gpio_wakeup_enable(USER_GPIO, GPIO_INTR_LOW_LEVEL);
-    esp_sleep_enable_gpio_wakeup();
-    esp_sleep_enable_timer_wakeup(3ULL * 1000000ULL);   // peek every 3s
+    M5.Display.sleep();                 // GC9107 sleep-in (keeps its state)
+    fox_backlight(0);                   // LP5562 blue channel off
+    while (digitalRead((int)USER_GPIO) == LOW) delay(10);   // release first
     for (;;) {
-        esp_light_sleep_start();
-        esp_sleep_wakeup_cause_t c = esp_sleep_get_wakeup_cause();
-        if (c == ESP_SLEEP_WAKEUP_GPIO) break;           // button press
-        if (c == ESP_SLEEP_WAKEUP_TIMER && imu_picked_up()) break;  // picked up
+        M5.update();
+        if (digitalRead((int)USER_GPIO) == LOW) break;      // button press
+        if (imu_picked_up()) break;                         // picked up
+        delay(60);
     }
+    while (digitalRead((int)USER_GPIO) == LOW) delay(10);   // don't leak a click
+    M5.Display.wakeup();
+    fox_backlight(200);
+    face_caption("*stretches* hi!");
+    face_draw(MOOD_HAPPY);
     face_wake();
 }
 

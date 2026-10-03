@@ -14,6 +14,8 @@
 #include <BLEScan.h>
 #include <BLEAdvertisedDevice.h>
 #include <esp_heap_caps.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 
 // forward decls from other units
 extern M5Canvas* face_canvas;
@@ -152,160 +154,240 @@ static float radar_range(const RadarSource& d) {
     return 0.12f + (1.0f - x) * 0.78f;
 }
 
-static float radar_gyro_angle(float& angle_deg, uint32_t& last_ms) {
-    float gx, gy, gz;
-    uint32_t now = millis();
-    float dt = last_ms ? (now - last_ms) * 0.001f : 0.0f;
-    last_ms = now;
-    if (!M5.Imu.getGyro(&gx, &gy, &gz)) return angle_deg;
-    // Held level, yaw is the Z gyro axis. Integrate the signed rotation and
-    // keep the display angle wrapped to one turn.
-    angle_deg += gz * dt;
-    while (angle_deg < 0) angle_deg += 360.0f;
-    while (angle_deg >= 360.0f) angle_deg -= 360.0f;
-    return angle_deg;
+// ---- heading: gravity-projected gyro yaw ------------------------------------
+// Accumulated CLOCKWISE rotation as seen from above (degrees, unwrapped). The
+// gyro vector is projected onto "up" (the accelerometer's gravity reading), so
+// it measures turning-in-place however Fox is held — flat or upright. Gyro
+// bias is measured while still; stalls (dt > 100ms) are skipped, never
+// multiplied into a jump.
+struct RadarHeading { float yaw = 0, bx = 0, by = 0, bz = 0; uint32_t last_us = 0; };
+
+static void radar_heading_calibrate(RadarHeading& h) {
+    float sx = 0, sy = 0, sz = 0; int n = 0; uint32_t t0 = millis();
+    while (millis() - t0 < 500) {
+        M5.Imu.update();
+        float gx, gy, gz;
+        if (M5.Imu.getGyro(&gx, &gy, &gz)) { sx += gx; sy += gy; sz += gz; ++n; }
+        delay(10);
+    }
+    if (n) { h.bx = sx / n; h.by = sy / n; h.bz = sz / n; }
+    h.yaw = 0; h.last_us = micros();
 }
 
-static void radar_draw(float green_angle, float red_angle, bool wifi, bool finished) {
+static float radar_heading_update(RadarHeading& h) {
+    M5.Imu.update();
+    float ax, ay, az, gx, gy, gz;
+    if (!M5.Imu.getAccel(&ax, &ay, &az) || !M5.Imu.getGyro(&gx, &gy, &gz)) return h.yaw;
+    uint32_t now = micros();
+    float dt = (now - h.last_us) * 1e-6f; h.last_us = now;
+    if (dt <= 0.0f || dt > 0.1f) return h.yaw;           // stall: skip, don't jump
+    float an = sqrtf(ax * ax + ay * ay + az * az);
+    if (an < 0.3f) return h.yaw;                           // free-fall / bad read
+    float rate = ((gx - h.bx) * ax + (gy - h.by) * ay + (gz - h.bz) * az) / an;   // deg/s about up
+    if (fabsf(rate) < 0.8f) rate = 0.0f;                   // drift deadband
+    h.yaw -= rate * dt;            // gyro is CCW-positive about up -> clockwise heading
+    return h.yaw;
+}
+
+// ---- background scanner ------------------------------------------------------
+// Scans block (WiFi ~0.8s, BLE 1s). They run on their own task so the needles
+// keep moving at full frame rate; each result is stamped with the heading at
+// the middle of the scan that heard it.
+struct RadarHit { char id[18]; char name[24]; int8_t rssi; float yaw; };
+static QueueHandle_t  radar_q = nullptr;
+static volatile float radar_live_yaw = 0.0f;
+static volatile bool  radar_worker_run = false;
+static volatile bool  radar_worker_alive = false;
+
+static void radar_push(const char* id, const char* name, int rssi, float yaw) {
+    RadarHit h; memset(&h, 0, sizeof h);
+    strncpy(h.id, id, sizeof(h.id) - 1);
+    strncpy(h.name, name, sizeof(h.name) - 1);
+    h.rssi = (int8_t)constrain(rssi, -127, 0);
+    h.yaw = yaw;
+    xQueueSend(radar_q, &h, 0);
+}
+
+static void radar_worker(void* arg) {
+    const bool wifi = (arg != nullptr);
+    while (radar_worker_run) {
+        float y0 = radar_live_yaw;
+        if (wifi) {
+            int n = WiFi.scanNetworks(false, true, false, 60);   // blocks THIS task only
+            float ym = (y0 + radar_live_yaw) * 0.5f;
+            for (int i = 0; i < n; ++i)
+                radar_push(WiFi.BSSIDstr(i).c_str(), WiFi.SSID(i).c_str(), WiFi.RSSI(i), ym);
+            WiFi.scanDelete();
+        } else if (ble_scan) {
+            BLEScanResults* res = ble_scan->start(1, false);
+            float ym = (y0 + radar_live_yaw) * 0.5f;
+            if (res) {
+                for (int i = 0; i < res->getCount(); ++i) {
+                    BLEAdvertisedDevice d = res->getDevice(i);
+                    String id = String(d.getAddress().toString().c_str());
+                    String nm = d.haveName() ? String(d.getName().c_str()) : id.substring(0, 8);
+                    radar_push(id.c_str(), nm.c_str(), d.getRSSI(), ym);
+                }
+                ble_scan->clearResults();
+            }
+        } else {
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
+    radar_worker_alive = false;
+    vTaskDelete(nullptr);
+}
+
+static void radar_worker_start(bool wifi) {
+    if (!radar_q) radar_q = xQueueCreate(96, sizeof(RadarHit));
+    xQueueReset(radar_q);
+    radar_worker_run = true;
+    radar_worker_alive = true;
+    xTaskCreatePinnedToCore(radar_worker, "radar", 8192, wifi ? (void*)1 : nullptr, 2, nullptr, 0);
+}
+
+static void radar_worker_stop() {
+    radar_worker_run = false;
+    uint32_t t0 = millis();
+    while (radar_worker_alive && millis() - t0 < 4000) delay(20);   // let the scan finish
+}
+
+static void radar_drain() {
+    RadarHit h;
+    while (radar_q && xQueueReceive(radar_q, &h, 0) == pdTRUE)
+        radar_sample(h.id, String(h.name), h.rssi, h.yaw);
+}
+
+// ---- drawing -----------------------------------------------------------------
+enum RadarPhase { RADAR_CAL, RADAR_MEASURE, RADAR_LIVE };
+
+static void radar_draw(float green, float red, bool wifi, RadarPhase ph, float heading) {
     uint16_t bg = cfg.color_bg, fur = cfg.color_primary, acc = cfg.color_accent;
     face_canvas->fillSprite(bg);
-    const int cx = 64, cy = 64, R = 48;
-    for (int r = 16; r <= R; r += 16) face_canvas->drawCircle(cx, cy, r, 0x2145);
-    // Fox in the center: deliberately tiny so the map reads as "around Fox".
+    const int cx = 64, cy = 66, R = 46;
+    // angle convention: degrees clockwise from "up" (12 o'clock)
+    auto at = [&](float deg, float r, int& x, int& y) {
+        float a = deg * PI / 180.0f;
+        x = cx + (int)lroundf(r * sinf(a));
+        y = cy - (int)lroundf(r * cosf(a));
+    };
+    for (int r = 15; r <= R; r += 15) face_canvas->drawCircle(cx, cy, r, 0x2145);
+    face_canvas->drawCircle(cx, cy, R, 0x4208);
+
+    if (ph == RADAR_MEASURE) {
+        // progress ring = how much of the one turn you've completed
+        float cov = fminf(fabsf(green), 360.0f);
+        if (cov > 1.0f) face_canvas->fillArc(cx, cy, R + 4, R + 2, 270.0f, 270.0f + cov, 0x07E0);
+        int x, y;
+        at(fmodf(red, 360.0f), R, x, y);
+        face_canvas->drawWideLine(cx, cy, x, y, 1.6f, 0xF800);       // red: target pace
+        at(fmodf(green + 3600.0f, 360.0f), R - 4, x, y);
+        face_canvas->drawWideLine(cx, cy, x, y, 1.6f, 0x07E0);       // green: you
+    } else if (ph == RADAR_LIVE) {
+        // purely decorative sweep with a fading trail
+        float sweep = fmodf(millis() * 0.18f, 360.0f);
+        for (int t = 60; t >= 0; t -= 6) {
+            int x, y; at(sweep - t, R, x, y);
+            uint16_t col = (uint16_t)(((uint8_t)((63 - t)) >> 1) << 5);
+            face_canvas->drawLine(cx, cy, x, y, col);
+        }
+        // tick at the top = the way you are facing
+        face_canvas->fillTriangle(cx - 4, cy - R - 1, cx + 4, cy - R - 1, cx, cy - R + 6, acc);
+    }
+
+    // sources: measure frame = relative to where the turn started;
+    // live = relative to where you face NOW (map turns with you)
+    float sweep_now = fmodf(millis() * 0.18f, 360.0f);
+    for (int i = 0; i < radar_n; ++i) {
+        RadarSource& d = radar_sources[i];
+        float bearing = radar_peak_angle(d);
+        float disp = (ph == RADAR_LIVE) ? bearing - heading : bearing;
+        disp = fmodf(disp + 3600.0f, 360.0f);
+        int x, y; at(disp, R * radar_range(d), x, y);
+        bool lit = false;
+        if (ph == RADAR_LIVE) { float da = fabsf(disp - sweep_now); if (da > 180) da = 360 - da; lit = da < 18.0f; }
+        uint16_t col = lit ? 0x07E0 : (d.seen && millis() - d.seen < 3000 ? fur : 0x8410);
+        face_canvas->fillCircle(x, y, lit ? 4 : 3, col);
+    }
+
+    // tiny fox in the middle, facing up = facing the way you face
     face_canvas->fillTriangle(cx-5,cy-2,cx-2,cy-9,cx+1,cy-3,fur);
     face_canvas->fillTriangle(cx+5,cy-2,cx+2,cy-9,cx-1,cy-3,fur);
     face_canvas->fillEllipse(cx,cy+2,5,4,fur);
     face_canvas->fillCircle(cx-2,cy+1,1,0x0000); face_canvas->fillCircle(cx+2,cy+1,1,0x0000);
 
-    // Decorative radar sweep angle (used only after the rotation is finished).
-    float sweep = fmodf(millis() * 0.18f, 360.0f);
-
-    if (!finished) {
-        // ROTATION PHASE: red = target pace, green = your live IMU heading.
-        // Match the green needle to the red one all the way around the circle.
-        float ga = (green_angle - 90) * PI / 180.0f;
-        float ra = (red_angle - 90) * PI / 180.0f;
-        face_canvas->drawLine(cx, cy, cx + (int)(R*cosf(ra)), cy + (int)(R*sinf(ra)), 0xF800);
-        face_canvas->drawLine(cx, cy, cx + (int)(R*cosf(ga)), cy + (int)(R*sinf(ga)), 0x07E0);
-    } else {
-        // DONE: purely-decorative rotating sweep arm with a fading green trail
-        // (the classic radar look). The spatial plot is already fixed; this just
-        // animates over it.
-        for (int t = 60; t >= 0; t -= 6) {
-            float sa = (sweep - t - 90) * PI / 180.0f;
-            uint16_t col = (uint16_t)(((uint8_t)((63 - t)) >> 1) << 5);  // green ramp
-            face_canvas->drawLine(cx, cy, cx + (int)(R*cosf(sa)), cy + (int)(R*sinf(sa)), col);
-        }
-    }
-
-    for (int i = 0; i < radar_n; ++i) {
-        RadarSource& d = radar_sources[i];
-        float bearing = radar_peak_angle(d);
-        float a = (bearing - 90) * PI / 180.0f;
-        float rr = R * radar_range(d);
-        int x = cx + (int)(rr*cosf(a)), y = cy + (int)(rr*sinf(a));
-        // Light the blip when the decorative sweep passes over its bearing.
-        bool lit = false;
-        if (finished) {
-            float da = fabsf(bearing - sweep); if (da > 180) da = 360 - da;
-            lit = da < 18.0f;
-        }
-        uint16_t col = lit ? 0x07E0
-                     : (d.seen && millis()-d.seen < 3000 ? fur : 0x8410);
-        face_canvas->fillCircle(x, y, lit ? 4 : 3, col);
-    }
+    face_canvas->setTextSize(1);
     face_canvas->setTextDatum(top_left); face_canvas->setTextColor(acc);
-    face_canvas->drawString(wifi ? "WIFI RADAR" : "BLE RADAR", 2, 2);
+    face_canvas->drawString(wifi ? "WIFI RADAR" : "BLE RADAR", 2, 1);
     face_canvas->setTextDatum(top_right); face_canvas->setTextColor(0x07E0);
-    face_canvas->drawString(finished ? "DONE" : "ROTATE", 126, 2);
+    char n[12]; snprintf(n, sizeof n, "%d", radar_n);
+    face_canvas->drawString(n, 126, 1);
     face_canvas->setTextDatum(bottom_center); face_canvas->setTextColor(0x9CD3);
-    face_canvas->drawString(finished ? "click = rescan" : "green -> red", 64, 124);
+    const char* hint = ph == RADAR_CAL ? "hold still..."
+                     : ph == RADAR_MEASURE ? (green < -25.0f ? "other way!" : "turn: green on red")
+                     : "click=rescan 2x=exit";
+    face_canvas->drawString(hint, 64, 127);
     face_canvas->pushSprite(0, 0);
-}
-
-__attribute__((unused)) static void radar_draw_prompt(bool wifi, float progress) {
-    face_canvas->fillSprite(cfg.color_bg);
-    face_canvas->setTextDatum(middle_center);
-    face_canvas->setTextColor(cfg.color_accent);
-    face_canvas->drawString(wifi ? "WIFI RADAR" : "BLE RADAR", 64, 18);
-    face_canvas->setTextColor(0xFFFF);
-    face_canvas->drawString("keep me level", 64, 43);
-    face_canvas->drawString("follow the red", 64, 58);
-    face_canvas->drawString("with the green", 64, 72);
-    face_canvas->drawString("rotate 360 deg", 64, 87);
-    face_canvas->drawRect(18, 103, 92, 7, 0x2145);
-    face_canvas->fillRect(20, 105, (int)(88*constrain(progress,0.f,1.f)), 3, 0x07E0);
-    face_canvas->pushSprite(0,0);
-}
-
-static void radar_scan_ble(float angle) {
-    ble_begin_once();
-    if (!ble_scan) return;
-    BLEScanResults* res = ble_scan->start(1, false);
-    if (!res) return;
-    for (int i = 0; i < res->getCount(); ++i) {
-        BLEAdvertisedDevice d = res->getDevice(i);
-        String id = String(d.getAddress().toString().c_str());
-        String nm = d.haveName() ? String(d.getName().c_str()) : id.substring(0, 8);
-        radar_sample(id.c_str(), nm, d.getRSSI(), angle);
-    }
-    ble_scan->clearResults();
-}
-
-static void radar_scan_wifi(float angle) {
-    int n = WiFi.scanNetworks(false, true, true, 180);
-    if (n < 0) return;
-    for (int i = 0; i < n; ++i) {
-        String id = WiFi.BSSIDstr(i);
-        radar_sample(id.c_str(), WiFi.SSID(i), WiFi.RSSI(i), angle);
-    }
-    WiFi.scanDelete();
 }
 
 static void radar_run(bool wifi) {
   for (;;) {
     radar_reset();
-    if (wifi) {
-        WiFi.mode(WIFI_STA); WiFi.disconnect(false, false); delay(50);
-    } else {
-        WiFi.mode(WIFI_OFF); delay(50); ble_begin_once();
-    }
+    if (wifi) { WiFi.mode(WIFI_STA); WiFi.disconnect(false, false); delay(50); }
+    else      { WiFi.mode(WIFI_OFF); delay(50); ble_begin_once(); }
+    speak("hold me still, then turn around once. keep the green needle on the red one~");
 
-    speak("keep me level, then follow the red needle with the green one~");
-    float green = 0, red = 0;
-    uint32_t last = millis(), start = last, last_scan = 0;
-    bool sweep = true;
-    while (sweep) {
+    RadarHeading hd;
+    radar_draw(0, 0, wifi, RADAR_CAL, 0);
+    radar_heading_calibrate(hd);
+    radar_worker_start(wifi);
+
+    // ---- ONE guided turn: red sweeps smoothly 0 -> 360 deg in 20 s and stops;
+    //      the measurement ends when YOU have turned a full circle. ----------
+    const float TARGET_DPS = 18.0f;
+    uint32_t t0 = millis();
+    bool quit = false;
+    float green = 0;
+    for (;;) {
+        uint32_t f0 = millis();
         M5.update();
-        if (M5.BtnA.wasDoubleClicked()) break;
-        uint32_t now = millis();
-        float dt = (now-last) * 0.001f; last = now;
-        float gx,gy,gz;
-        if (M5.Imu.getGyro(&gx,&gy,&gz)) green = fmodf(green + gz*dt + 360.0f, 360.0f);
-        red = fmodf((now-start) * 12.0f, 360.0f); // 30 sec per guided turn
-        float err = fabsf(green-red); if (err > 180) err = 360-err;
-        if (now-last_scan > 450) {
-            last_scan = now;
-            if (wifi) radar_scan_wifi(green); else radar_scan_ble(green);
-        }
-        // DURING rotation: show the actual radar — fox centered, green (your
-        // live IMU heading) chasing red (the target pace), and sources popping in
-        // as they're detected. This is the matching game; no text histogram.
-        radar_draw(green, red, wifi, false);
-        if (red > 355.0f && err < 28.0f) sweep = false;
-        if (now-start > 45000) sweep = false;
-        delay(8);
+        if (M5.BtnA.wasDoubleClicked()) { quit = true; break; }
+        green = radar_heading_update(hd);
+        radar_live_yaw = green;
+        radar_drain();
+        float red = fminf(360.0f, (millis() - t0) * 0.001f * TARGET_DPS);
+        radar_draw(green, red, wifi, RADAR_MEASURE, 0);
+        if (fabsf(green) >= 360.0f) break;       // one full turn, either way
+        if (millis() - t0 > 60000) break;        // don't trap anyone
+        uint32_t el = millis() - f0; if (el < 30) delay(30 - el);
     }
-    radar_draw(green, red, wifi, true);
-    speak(String("i mapped ") + radar_n + " signals around me~");
-    while (true) {
+    if (quit) { radar_worker_stop(); tool_radio_release(); return; }
+
+    // a full turn brings you back to where you started: heading 0 == start
+    hd.yaw = fmodf(hd.yaw, 360.0f);
+    face_caption(String("mapped ") + radar_n + " signals!");
+    radar_draw(green, 360, wifi, RADAR_LIVE, hd.yaw);
+    speak(String("i mapped ") + radar_n + " signals around us~");
+    hd.last_us = micros();                       // don't integrate across the speech
+
+    // ---- live map: keeps scanning and keeps tracking your heading, so the
+    //      map stays pinned to the room while you turn. ----------------------
+    bool rescan = false;
+    for (;;) {
+        uint32_t f0 = millis();
         M5.update();
-        if (M5.BtnA.wasDoubleClicked()) { tool_radio_release(); return; }
-        if (M5.BtnA.wasClicked()) { break; }
-        radar_draw(green, red, wifi, true);   // animates the decorative sweep
-        delay(33);
+        if (M5.BtnA.wasDoubleClicked()) { quit = true; break; }
+        if (M5.BtnA.wasSingleClicked()) { rescan = true; break; }
+        float h = radar_heading_update(hd);
+        radar_live_yaw = h;
+        radar_drain();
+        radar_draw(0, 0, wifi, RADAR_LIVE, h);
+        uint32_t el = millis() - f0; if (el < 33) delay(33 - el);
     }
+    radar_worker_stop();
     tool_radio_release();
+    if (quit || !rescan) return;
   }
 }
 

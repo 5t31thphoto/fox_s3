@@ -17,7 +17,7 @@
 //  fox_idle_line, fox_time_greeting, fox_reflect)
 
 // ---- tiny on-device LLM (fox_llm.cpp) --------------------------------------
-String llm_flavour(const String& fact, FoxMood mood, const FoxConfig& cfg);
+// (v2) brain_decide() lives in fox_llm.cpp; see fox_brain.cpp fox_dress()
 
 // ---- voice (fox_voice.cpp) --------------------------------------------------
 // (declared in fox.h: voice_begin, voice_say, voice_babble, voice_is_pico)

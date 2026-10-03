@@ -28,6 +28,8 @@
 #include <esp_sleep.h>
 #include <esp_heap_caps.h>
 #include <esp_log.h>
+#include "brain_policy.h"     // act/feel names (trainer-generated)
+#include "mn_phonemes.h"      // MultiNet phonemes (CI-generated; empty = runtime G2P)
 #include <esp_partition.h>
 #include <math.h>
 #include <ctype.h>
@@ -49,7 +51,17 @@ static FoxConfig cfg;
 static FoxNeeds  needs;
 // The online (Groq) brain is used only when a key is configured AND the user
 // has it switched on (menu "brain" / "go online" / "go offline").
-static inline bool cloud_brain() { return cfg.cloud_enabled && cfg.brain_online; }
+static uint32_t s_online_cool = 0;     // network trouble: skip online calls until this
+static inline bool cloud_brain() {
+    return cfg.cloud_enabled && cfg.brain_online && (int32_t)(s_online_cool - millis()) <= 0;
+}
+// A failed online call (no HTTP answer, timeout, TLS failure, 5xx) means the
+// network or Groq is struggling: think offline for a couple of minutes instead
+// of making every utterance wait on it again.
+static void online_trouble(const char* what, int code) {
+    s_online_cool = millis() + 120000;
+    Serial.printf("FOX: %s failed (%d) -> offline brain for 2 min\n", what, code);
+}
 static Preferences prefs;
 // Set by any game/tool/toy when the user double-clicks to bail to the menu.
 // The main loop honors it after the app's own loop returns.
@@ -320,20 +332,42 @@ static bool init_speech() {
     if (esp_mn_commands_alloc((esp_mn_iface_t*)mn, (model_iface_data_t*)mn_data) != ESP_OK)
         return false;
     esp_mn_commands_clear();
-    int added = 0, rejected = 0;
+    int added = 0, with_phonemes = 0;
     for (size_t i = 0; i < COMMAND_COUNT; ++i) {
         const char* p = COMMANDS[i].phrases;
         while (*p) {
             char ph[64]; size_t k = 0;
-            while (*p && *p != ';' && k < sizeof(ph) - 1) ph[k++] = *p++;
+            while (*p && *p != ';' && k < sizeof(ph) - 1) {
+                char c = *p++;
+                // MultiNet English accepts lowercase letters and spaces ONLY
+                // (docs: "cannot contain Arabic numerals and special
+                // characters"). Sanitise so one stray char can't abort the
+                // whole grammar update.
+                if (c >= 'A' && c <= 'Z') c = c - 'A' + 'a';
+                if ((c >= 'a' && c <= 'z') || c == ' ') ph[k++] = c;
+            }
             ph[k] = 0; if (*p == ';') ++p;
+            while (k && ph[k-1] == ' ') ph[--k] = 0;      // trim trailing space
             if (!k) continue;
-            if (esp_mn_commands_add(COMMANDS[i].id, ph) == ESP_OK) ++added;
-            else { ++rejected; Serial.printf("FOX: MultiNet rejected '%s'\n", ph); }
+            // Espressif's recommended path: precomputed phonemes (CI-generated
+            // with their multinet_g2p alphabet). Runtime G2P only as fallback.
+            const char* phon = nullptr;
+            for (int q = 0; q < MN_PHONEMES_N; ++q)
+                if (MN_PHONEMES[q].text && !strcmp(MN_PHONEMES[q].text, ph)) { phon = MN_PHONEMES[q].ph; break; }
+            esp_err_t r = phon ? esp_mn_commands_phoneme_add(COMMANDS[i].id, ph, phon)
+                               : esp_mn_commands_add(COMMANDS[i].id, ph);
+            if (r == ESP_OK) { ++added; if (phon) ++with_phonemes; }
+            else Serial.printf("FOX: add failed '%s'\n", ph);
         }
     }
-    esp_mn_commands_update();
-    Serial.printf("FOX: MultiNet phrases added=%d rejected=%d\n", added, rejected);
+    // update() returns NULL on success, or a non-NULL error list if any phrase
+    // could not be parsed. We don't walk the (version-specific) list layout;
+    // the sanitiser above already guarantees letters-and-spaces only, which is
+    // the documented requirement, so a clean update is expected. Log either way.
+    esp_mn_error_t* err = esp_mn_commands_update();
+    esp_mn_active_commands_print();           // prints the ACTIVE grammar to serial
+    Serial.printf("FOX: MultiNet grammar %s (phrases added=%d, precomputed phonemes=%d)\n",
+                  err ? "update reported unparsed phrases (see log above)" : "OK", added, with_phonemes);
     esp_log_level_set("AFE", ESP_LOG_ERROR);   // fetch-while-draining is expected to find it empty
     mn->print_active_speech_commands(mn_data);
     if (afe->get_fetch_chunksize(afe_data) != mn->get_samp_chunksize(mn_data)) {
@@ -343,7 +377,7 @@ static bool init_speech() {
     return true;
 }
 
-static int recognize_offline(int16_t* audio, size_t samples) {
+static int recognize_offline(int16_t* audio, size_t samples, int* best_id = nullptr, float* best_prob = nullptr) {
     if (!speech_ready || !audio || samples < SAMPLE_RATE / 4) return -1;
     // MultiNet takes raw 16 kHz mono directly (Espressif's own MultiNet file
     // test feeds it this way). The AFE front-end produced NO output for PTT
@@ -383,6 +417,8 @@ static int recognize_offline(int16_t* audio, size_t samples) {
     heap_caps_free(in);
     Serial.printf("FOX: MultiNet id=%d prob=%.2f (%s, chunk=%d n=%d gain=%.2f rms=%.0f)\n",
                   found_id, found_prob, why, chunk, chunks, g, rms);
+    if (best_id) *best_id = found_id;
+    if (best_prob) *best_prob = found_prob;
     if (found_id < 0) return -1;
     float need = (found_id >= 60) ? MIN_TOPIC_PROB : MIN_COMMAND_PROB;
     return (found_prob >= need) ? found_id : -1;
@@ -455,8 +491,8 @@ static void add_tools(JsonDocument& q) {
 // when the configured model is rejected (Groq retires models: llama-3.1-8b-
 // instant was shut down 2026-08-16). The choice is saved to NVS.
 static bool cloud_pick_model() {
-    WiFiClientSecure c; c.setInsecure();
-    HTTPClient h;
+    WiFiClientSecure c; c.setInsecure(); c.setHandshakeTimeout(10);
+    HTTPClient h; h.setConnectTimeout(6000);
     if (!h.begin(c, cfg.api_base + "/models")) return false;
     h.addHeader("Authorization", "Bearer " + cfg.api_key);
     h.setTimeout(10000);
@@ -492,8 +528,46 @@ static bool cloud_pick_model() {
     return true;
 }
 
+// ---- Groq FREE-TIER budget manager -----------------------------------------
+// Every free chat model has its OWN limits (30 req/min, 1,000 req/day each), so
+// rotating across them when one is exhausted multiplies the daily budget. A 429
+// carries retry-after: short = per-minute limit, long = that model's day is used.
+static const char* const FREE_CHAT_MODELS[] = {
+    "openai/gpt-oss-20b",          // lightest (8K tok/min), first choice
+    "openai/gpt-oss-120b",
+    "qwen/qwen3.8-27b",            // preview: may disappear, last resort
+};
+static uint32_t s_model_cool[4] = {0, 0, 0, 0};   // [0] = cfg.chat_model, then the list
+static bool s_llm_rest_told = false;
+
+static const char* chat_model_at(int i) {
+    return i == 0 ? cfg.chat_model.c_str() : FREE_CHAT_MODELS[i - 1];
+}
+static int pick_chat_model() {
+    uint32_t now = millis();
+    for (int i = 0; i < 4; ++i) {
+        if (i > 0 && cfg.chat_model == FREE_CHAT_MODELS[i - 1]) continue;   // same as slot 0
+        if ((int32_t)(s_model_cool[i] - now) <= 0) return i;
+    }
+    return -1;                                        // everything is resting
+}
+// Is ANY online chat model available right now? (STT has its own budget.)
+static bool llm_available() { return cloud_brain() && pick_chat_model() >= 0; }
+
+// Tools cost tokens on every request; only send them when the question could
+// actually need live data. Everything else (chat) goes without them.
+static bool wants_tools(const String& text) {
+    String s = text; s.toLowerCase();
+    static const char* const KEYS[] = {"weather", "rain", "snow", "temperature", "outside", "sunny",
+        "cold out", "hot out", "forecast", "bitcoin", "crypto", "price", "aurora", "northern lights",
+        "space", "solar", "geomagnetic", "storm", "wifi", "bluetooth", "network", "devices", "time"};
+    for (const char* k : KEYS) if (s.indexOf(k) >= 0) return true;
+    return false;
+}
+
 static String cloud_chat(const String& user_text) {
-    if (!cloud_brain() || !wifi_connect()) return "";
+    if (!cloud_brain()) return "";
+    if (!wifi_connect()) { online_trouble("WiFi", -1); return ""; }
 
     // Build the running message list so we can append tool results.
     JsonDocument conv;
@@ -502,31 +576,39 @@ static String cloud_chat(const String& user_text) {
     { JsonObject u = msgs.add<JsonObject>(); u["role"] = "user"; u["content"] = user_text; }
 
     bool model_retried = false;
+    const bool tools = wants_tools(user_text);
     const int MAX_ROUNDS = 3;                    // up to 2 tool rounds + final answer
+    int mi = pick_chat_model();
+    if (mi < 0) return "";
     for (int round = 0; round < MAX_ROUNDS; ++round) {
-        WiFiClientSecure client; client.setInsecure();
-        HTTPClient h;
+        WiFiClientSecure client; client.setInsecure(); client.setHandshakeTimeout(10);
+        HTTPClient h; h.setConnectTimeout(6000);
         if (!h.begin(client, cfg.api_base + "/chat/completions")) return "";
         h.addHeader("Content-Type", "application/json");
         h.addHeader("Authorization", "Bearer " + cfg.api_key);
         h.setTimeout(15000);
+        static const char* HDRS[] = {"retry-after"};
+        h.collectHeaders(HDRS, 1);
 
+        const char* model = chat_model_at(mi);
         JsonDocument q;
-        q["model"] = cfg.chat_model;
+        q["model"] = model;
         q["temperature"] = 0.7;
-        q["max_tokens"] = 512;
-        if (cfg.chat_model.indexOf("gpt-oss") >= 0) {   // reasoning model: keep it brief
-            q["reasoning_effort"] = "low";
-        }
+        q["max_tokens"] = 400;
+        if (strstr(model, "gpt-oss")) q["reasoning_effort"] = "low";   // keep reasoning short
         q["messages"] = conv["messages"];       // copy running conversation
-        // Groq's tool-calling flow sends the tool definitions on EVERY request
-        // (the history contains tool calls/results). On the last round force a
-        // spoken answer instead of yet another tool call.
-        add_tools(q);
-        if (round == MAX_ROUNDS - 1) q["tool_choice"] = "none";
+        // Tools only when the question can use them (saves free-tier tokens).
+        // Once offered, Groq's flow needs them on every round of this request.
+        if (tools) {
+            add_tools(q);
+            if (round == MAX_ROUNDS - 1) q["tool_choice"] = "none";
+        }
 
         String body; serializeJson(q, body);
+        uint32_t t_llm = millis();
         int code = h.POST(body);
+        Serial.printf("FOX: LLM %s took %lums (HTTP %d)\n", model, (unsigned long)(millis() - t_llm), code);
+        String retry_after = h.header("retry-after");     // read before end() clears it
         if (code != 200) {
             String err = code > 0 ? h.getString() : HTTPClient::errorToString(code);
             Serial.printf("FOX: LLM HTTP %d: %.200s\n", code, err.c_str());
@@ -535,7 +617,18 @@ static String cloud_chat(const String& user_text) {
                                    err.indexOf("decommissioned") >= 0) && cloud_pick_model()) {
                 model_retried = true; --round; continue;    // retry with a live model
             }
-            if (code == 429) return "phew, i'm out of breath. ask me again in a minute";   // free-tier rate limit
+            if (code < 0 || code >= 500) { online_trouble("LLM", code); return ""; }
+            if (code == 429) {
+                // Free-tier limit on THIS model. Rest it, then try the next free one.
+                long ra = retry_after.toInt();
+                if (ra <= 0) ra = 60;
+                s_model_cool[mi] = millis() + (uint32_t)ra * 1000UL;
+                Serial.printf("FOX: %s rate-limited, resting %lds (%s)\n", model, ra,
+                              ra > 300 ? "daily budget used" : "per-minute limit");
+                int nx = pick_chat_model();
+                if (nx >= 0 && nx != mi) { mi = nx; --round; continue; }
+                return "";                           // all free models resting -> offline brain
+            }
             return "";
         }
         JsonDocument r;
@@ -577,7 +670,8 @@ static String cloud_chat(const String& user_text) {
 }
 
 static String cloud_transcribe(int16_t* audio, size_t samples) {
-    if (!audio || !samples || !cloud_brain() || !wifi_connect()) return "";
+    if (!audio || !samples || !cloud_brain()) return "";
+    if (!wifi_connect()) { online_trouble("WiFi", -1); return ""; }
     String head = "--foxB\r\nContent-Disposition: form-data; name=\"file\"; "
                   "filename=\"a.wav\"\r\nContent-Type: audio/wav\r\n\r\n";
     String tail = "\r\n--foxB\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n"
@@ -606,13 +700,16 @@ static String cloud_transcribe(int16_t* audio, size_t samples) {
     memcpy(buf + o, audio, data_bytes); o += data_bytes;
     memcpy(buf + o, tail.c_str(), tail.length()); o += tail.length();
 
-    WiFiClientSecure client; client.setInsecure();
-    HTTPClient h;
+    WiFiClientSecure client; client.setInsecure(); client.setHandshakeTimeout(10);
+    HTTPClient h; h.setConnectTimeout(6000);
     if (!h.begin(client, cfg.api_base + "/audio/transcriptions")) { free(buf); return ""; }
     h.addHeader("Authorization", "Bearer " + cfg.api_key);
     h.addHeader("Content-Type", "multipart/form-data; boundary=foxB");
     h.setTimeout(20000);                       // several seconds of audio upload
+    uint32_t t_stt = millis();
     int code = h.POST(buf, total);
+    Serial.printf("FOX: STT took %lums (HTTP %d)\n", (unsigned long)(millis() - t_stt), code);
+    if (code < 0 || code >= 500) online_trouble("STT", code);
     String out;
     if (code == 200) {
         JsonDocument r;
@@ -682,8 +779,8 @@ static void launch(const char* id) {
     else if (!strcmp(id, "spiro"))      toy_spiro();
     else if (!strcmp(id, "probes"))     { if (cfg.tool_wifi) tool_menu_probe_sniff(); else speak("wifi is switched off"); }
     else if (!strcmp(id, "lipsync"))    face_lipsync_mode();
-    else if (!strcmp(id, "weather"))    speak(net_weather());
-    else if (!strcmp(id, "btc"))        speak(net_bitcoin_price());
+    else if (!strcmp(id, "weather"))    { String r = net_weather(); g_brain_ctx = BrainCtx{ACT_REPORT, FEEL_NONE, 0, false}; speak(r); }
+    else if (!strcmp(id, "btc"))        { String r = net_bitcoin_price(); g_brain_ctx = BrainCtx{ACT_REPORT, FEEL_NONE, 0, false}; speak(r); }
     else if (!strcmp(id, "random_game")) {
         static const char* G[]  = {"wormhole", "catch", "twentyq", "reaction", "maze"};
         static const char* GN[] = {"wormhole", "catch the treats", "twenty questions", "reaction test", "the maze"};
@@ -691,8 +788,8 @@ static void launch(const char* id) {
         speak(String("let's play ") + GN[k] + "!");
         launch(G[k]);
     }
-    else if (!strcmp(id, "space"))      speak(net_space_weather());
-    else if (!strcmp(id, "aurora"))     speak(net_aurora());
+    else if (!strcmp(id, "space"))      { String r = net_space_weather(); g_brain_ctx = BrainCtx{ACT_REPORT, FEEL_NONE, 0, false}; speak(r); }
+    else if (!strcmp(id, "aurora"))     { String r = net_aurora(); g_brain_ctx = BrainCtx{ACT_REPORT, FEEL_NONE, 0, false}; speak(r); }
 }
 
 // Dispatch from the on-device flick menu (fox_input.inc calls this).
@@ -726,7 +823,16 @@ void menu_dispatch(const char* id) {
 //  only occasionally hints at things it understands. Every line goes through
 //  speak() -> fox_dress() so the personality/brain flavours it.
 // ============================================================================
-template <size_t N> static const char* pick_line(const char* const (&a)[N]) { return a[esp_random() % N]; }
+// pick a line at random but avoid repeating the immediately previous choice
+// from the same pool (so jokes/replies don't say the same thing twice in a row)
+template <size_t N> static const char* pick_line(const char* const (&a)[N]) {
+    static const void* last_pool = nullptr; static uint32_t last_idx = 0xFFFF;
+    if (N == 1) return a[0];
+    uint32_t i = esp_random() % N;
+    if ((const void*)a == last_pool && i == last_idx) i = (i + 1) % N;
+    last_pool = (const void*)a; last_idx = i;
+    return a[i];
+}
 
 
 // ============================================================================
@@ -741,23 +847,39 @@ template <size_t N> static const char* pick_line(const char* const (&a)[N]) { re
 //  something in context.
 // ============================================================================
 static void do_action(const char* action);   // defined below
+struct ChatQ { const char* q; const char* yes; const char* no; };
 struct ChatState {
     const char* offer = nullptr;    // action to run if the user says yes
     String offer_why;               // reason for the offer (answers "why")
     String topic;                   // last thing we talked about
     String user_feel;               // what the user told us they feel
-    int    ask = -1;                // index of the question we just asked
+    const ChatQ* ask = nullptr;     // the yes/no question we just asked
+    uint32_t moves = 0;             // count of asks/offers (did a handler already steer?)
+    uint8_t  turn = 0;              // exchanges in this conversation (0,1,2+)
+    uint32_t last_user = 0;         // when the user last spoke
     int    story_step = -1;         // story in progress (for "tell me more")
     int    story_seed = 0;
     uint32_t at = 0;                // when the state was last touched
 };
 static ChatState chat;
+static uint32_t s_proposal_at = 0;   // fox-time proposal deadline (fwd use in chat_intent)
 static bool chat_fresh() { return millis() - chat.at < 90000; }
 static void chat_touch(const char* topic) { chat.topic = topic; chat.at = millis(); }
 
+static uint8_t feel_idx() {
+    const String& f = chat.user_feel;
+    if (f == "sad")    return FEEL_SAD;    if (f == "happy")  return FEEL_HAPPY;
+    if (f == "tired")  return FEEL_TIRED;  if (f == "hungry") return FEEL_HUNGRY;
+    if (f == "scared") return FEEL_SCARED; if (f == "cold" || f == "hot") return FEEL_COLD;
+    if (f == "lonely") return FEEL_LONELY;
+    return FEEL_NONE;
+}
+
 // Offer something: the next "yes" runs it, "no" declines, "why" explains.
 static void chat_offer(const String& line, const char* action, const char* why) {
-    chat.offer = action; chat.offer_why = why; chat.ask = -1; chat.at = millis();
+    chat.offer = action; chat.offer_why = why; chat.ask = nullptr; chat.at = millis();
+    ++chat.moves;
+    g_brain_ctx = BrainCtx{ACT_OFFER, feel_idx(), chat.turn, false};
     speak(line);
 }
 
@@ -786,7 +908,6 @@ static const char* const STORY_END[] = {
     "it was a door to a warm den full of berries, and she shared them all. the end!",
     "it led right back home, and she realised the adventure was the treasure. the end!",
 };
-struct ChatQ { const char* q; const char* yes; const char* no; };
 static const ChatQ CHAT_QS[] = {
     {"do you like snow?",            "me too! foxes love diving into snow",          "fair. cold paws are no fun"},
     {"have you eaten today?",        "good. a fed human is a happy human",            "go get a snack! i'll wait right here"},
@@ -813,14 +934,44 @@ static void chat_story_next() {
     }
 }
 
-static void chat_ask_question() {
+// Questions tied to how the user feels (the brain's "ask" / "check-in" moves).
+static const ChatQ Q_TALK   = {"do you want to talk about it?",
+                               "okay. hold my button and tell me. i'm listening", "that's okay. i'm right here"};
+static const ChatQ Q_BETTER = {"feeling a little better now?",
+                               "yay! that makes my tail wag", "aww. want me to tell you a joke?"};
+static const ChatQ Q_REST   = {"maybe rest a little? i'll be quiet with you",
+                               "good idea. cozy time", "okay, i'll keep you company then"};
+static const ChatQ Q_MORE   = {"want to tell me more about it?",
+                               "ooh, hold my button and tell me everything!", "okay! maybe later"};
+
+static void chat_ask(const ChatQ* q) {
     chat_touch("ask");
     chat.offer = nullptr;
-    chat.ask = esp_random() % N_QS;              // the next yes/no answers THIS
-    speak(CHAT_QS[chat.ask].q);
+    chat.ask = q;                                // the next yes/no answers THIS
+    ++chat.moves;
+    g_brain_ctx = BrainCtx{ACT_ASK, feel_idx(), chat.turn, false};
+    speak(q->q);
 }
+static void chat_ask_question() {
+    // contextual first: a sad/lonely user gets "talk about it", a happy one "tell me more"
+    if (chat.user_feel == "sad")   { chat_ask(&Q_TALK); return; }
+    if (chat.user_feel == "happy") { chat_ask(&Q_MORE); return; }
+    if (chat.user_feel == "tired") { chat_ask(&Q_REST); return; }
+    chat_ask(&CHAT_QS[esp_random() % N_QS]);
+}
+static void chat_checkin() { chat_ask(&Q_BETTER); }
 
 static void chat_offer_activity() {
+    if (chat.user_feel == "tired") {
+        if (esp_random() % 2) chat_offer("want to watch some calm pretty lights?", "plasma", "because calm colors help you rest");
+        else chat_offer("want a cozy little story?", "c_story", "because stories are restful");
+        return;
+    }
+    if (chat.user_feel == "sad") {
+        if (esp_random() % 2) chat_offer("want me to tell you a joke?", "t_joke", "because a little laugh might help");
+        else chat_offer("want to play a gentle game with me?", "random_game", "because company helps");
+        return;
+    }
     static const char* A[]  = {"wormhole", "catch", "twentyq", "maze", "plasma", "weather"};
     static const char* AL[] = {"want to fly the wormhole?", "want to catch some treats?",
                                "want to play twenty questions?", "want to explore the maze?",
@@ -829,27 +980,38 @@ static void chat_offer_activity() {
     chat_offer(AL[k], A[k], "because doing something together is more fun than doing nothing");
 }
 
-static void chat_intent(const char* id) {
+static void chat_intent_body(const char* id) {
     FoxMood m = fox_mood(needs);
     needs_interact(needs, false);
     String nm = cfg.name;
     // ---------- glue words: resolve against the conversation memory ----------
     if (!strcmp(id, "c_yes")) {
+        s_proposal_at = 0; face_caption("");
         if (chat.offer && chat_fresh()) {
             const char* a = chat.offer; chat.offer = nullptr;
             if (!strcmp(a, "c_more")) { chat_story_next(); return; }
             speak("yay!");
-            if (!strncmp(a, "t_", 2) || !strncmp(a, "c_", 2)) do_action(a); else menu_dispatch(a);
+            do_action(a);                            // any action: command, topic, chat, tool
             return;
         }
-        if (chat.ask >= 0 && chat_fresh()) { int q = chat.ask; chat.ask = -1; speak(CHAT_QS[q].yes); return; }
+        if (chat.ask && chat_fresh()) {
+            const ChatQ* q = chat.ask; chat.ask = nullptr;
+            if (q == &Q_BETTER) chat.user_feel = "happy";
+            speak(q->yes); return;
+        }
         static const char* L[] = {"yes! i agree", "mm-hm!", "exactly", "you get me"};
         speak(pick_line(L)); return;
     }
     if (!strcmp(id, "c_no")) {
+        s_proposal_at = 0; face_caption("");
         if (chat.offer && chat_fresh()) { chat.offer = nullptr; speak("okay, maybe later");
             if (esp_random() % 2) chat_offer_activity(); return; }
-        if (chat.ask >= 0 && chat_fresh()) { int q = chat.ask; chat.ask = -1; speak(CHAT_QS[q].no); return; }
+        if (chat.ask && chat_fresh()) {
+            const ChatQ* q = chat.ask; chat.ask = nullptr;
+            speak(q->no);
+            if (q == &Q_BETTER) chat_offer("want me to tell you a joke?", "t_joke", "because a little laugh might help");
+            return;
+        }
         static const char* L[] = {"aww, okay", "no? hmm, fair enough", "alright, your call"};
         speak(pick_line(L)); return;
     }
@@ -943,14 +1105,26 @@ static void chat_intent(const char* id) {
     speak("hmm?");
 }
 
-static void converse_topic(const char* id) {
+static void converse_topic_body(const char* id) {
     FoxMood m = fox_mood(needs);
     needs_interact(needs, false);
     static const char* LOVE[]   = {"aww. i love you too", "*happy tail wiggle*", "you're my favorite human", "that makes my ears all warm"};
     static const char* SAD[]    = {"oh no. come here, i'll sit with you", "i'm right here. want to tell me about it?", "*leans on you* it's okay", "sad days pass. i'll keep you company"};
     static const char* HAPPY[]  = {"yay! happy you makes happy me", "*bounces* tell me what happened!", "that's the best news", "hehe, your good mood is contagious"};
     static const char* TIRED[]  = {"me too... cozy nap?", "*yawns* rest a little, i'll watch", "sleepy foxes unite", "maybe a break would help"};
-    static const char* JOKE[]   = {"why did the fox cross the road? to get to the other den!", "what do you call a sleepy fox? a snoozie!", "i tried to catch fog. i mist.", "why are foxes good at drums? they have great paws-ition"};
+    static const char* JOKE[] = {
+        "why did the fox cross the road? to get to the other den!",
+        "what do you call a sleepy fox? a snoozie!",
+        "i tried to catch fog. i mist.",
+        "why are foxes good at drums? they have great paws-ition",
+        "what is a fox's favorite weather? fur-ost!",
+        "why don't foxes play cards in the wild? too many cheetahs",
+        "what do you call a fox with a map? a path-finder!",
+        "i told my tail a joke. now it won't stop wagging",
+        "why was the little fox so warm? it was in its comfort zone... literally, i sat on a heater",
+        "what is orange and sounds like a parrot? a carrot! okay that one's not about foxes",
+        "how does a fox answer the phone? yip yip, who's this?",
+        "why did the fox bring string to the party? to tie the mood together"};
     static const char* THANKS[] = {"you're welcome!", "anytime, friend", "hehe, happy to help", "*proud little nod*"};
     static const char* SORRY[]  = {"it's okay, i forgive you", "no worries at all", "we're good, promise", "*nuzzles* all better"};
     static const char* MORN[]   = {"good morning! did you sleep well?", "morning! i'm ready for the day", "*stretches* hi hi, good morning"};
@@ -985,23 +1159,155 @@ static void converse_topic(const char* id) {
 }
 
 // Unrecognised speech: answer the SHAPE of it, keep the conversation moving.
+
+// ============================================================================
+//  BRAIN <-> CONVERSATION. Every intent maps to a speech ACT (and sometimes a
+//  feeling it implies). The wrapper ARMS the brain with the situation, runs
+//  the handler (whose first line the brain styles), then executes the brain's
+//  chosen NEXT move — unless the handler already asked/offered something.
+// ============================================================================
+struct IntentAct { const char* id; uint8_t act; const char* feel; };
+static const IntentAct INTENT_ACTS[] = {
+    {"c_yes", ACT_AGREE, nullptr}, {"c_no", ACT_DECLINE, nullptr}, {"c_maybe", ACT_CURIOUS, nullptr},
+    {"c_why", ACT_CURIOUS, nullptr}, {"c_more", ACT_CURIOUS, nullptr}, {"c_you", ACT_ANSWER, nullptr},
+    {"c_metoo", ACT_AFFECTION, nullptr}, {"c_really", ACT_CURIOUS, nullptr}, {"c_wow", ACT_PLAYFUL, nullptr},
+    {"c_age", ACT_ANSWER, nullptr}, {"c_home", ACT_ANSWER, nullptr}, {"c_food", ACT_ANSWER, nullptr},
+    {"c_color", ACT_ANSWER, nullptr}, {"c_friends", ACT_ANSWER, nullptr}, {"c_dream", ACT_ANSWER, nullptr},
+    {"c_real", ACT_ANSWER, nullptr},
+    {"c_hungry", ACT_CARE, "hungry"}, {"c_cold", ACT_CARE, "cold"}, {"c_hot", ACT_CARE, "hot"},
+    {"c_scared", ACT_COMFORT, "scared"}, {"c_lonely", ACT_COMFORT, "lonely"},
+    {"c_excited", ACT_CELEBRATE, "happy"}, {"c_angry", ACT_COMFORT, "sad"},
+    {"c_home_back", ACT_GREET, nullptr}, {"c_leaving", ACT_FAREWELL, nullptr}, {"c_work", ACT_FAREWELL, nullptr},
+    {"c_miss", ACT_AFFECTION, nullptr}, {"c_birthday", ACT_CELEBRATE, "happy"}, {"c_funny", ACT_PLAYFUL, nullptr},
+    {"c_mean", ACT_SULK, nullptr}, {"c_hug", ACT_AFFECTION, nullptr}, {"c_weather_talk", ACT_CURIOUS, nullptr},
+    {"c_story", ACT_STORY, nullptr}, {"c_fact", ACT_FACT, nullptr}, {"c_secret", ACT_PLAYFUL, nullptr},
+    {"c_sing", ACT_PLAYFUL, nullptr}, {"c_compliment", ACT_COMPLIMENT, nullptr}, {"c_cheer", ACT_COMFORT, nullptr},
+    {"c_trick", ACT_PLAYFUL, nullptr}, {"c_noise", ACT_PLAYFUL, nullptr}, {"c_coin", ACT_PLAYFUL, nullptr},
+    {"c_dice", ACT_PLAYFUL, nullptr}, {"c_number", ACT_PLAYFUL, nullptr}, {"c_eightball", ACT_PLAYFUL, nullptr},
+    {"c_askme", ACT_ASK, nullptr}, {"c_whatdo", ACT_OFFER, nullptr},
+    {"t_love", ACT_AFFECTION, nullptr}, {"t_sad", ACT_COMFORT, "sad"}, {"t_happy", ACT_CELEBRATE, "happy"},
+    {"t_tired", ACT_CARE, "tired"}, {"t_joke", ACT_JOKE, nullptr}, {"t_thanks", ACT_THANKS, nullptr},
+    {"t_sorry", ACT_APOLOGY, nullptr}, {"t_morning", ACT_GREET, nullptr}, {"t_bye", ACT_FAREWELL, nullptr},
+    {"t_name", ACT_ANSWER, nullptr}, {"t_bored", ACT_OFFER, nullptr}, {"t_praise", ACT_COMPLIMENT, nullptr},
+    {"t_doing", ACT_ANSWER, nullptr}, {"t_friend", ACT_AFFECTION, nullptr},
+};
+
+static void chat_followup(uint8_t next) {
+    switch (next) {
+        case 1: chat_ask_question(); break;
+        case 2: chat_offer_activity(); break;
+        case 3: speak(String("oh! fox fact: ") + FOX_FACTS[esp_random() % 8]); chat_touch("fact"); break;
+        case 4: chat_checkin(); break;
+        default: break;
+    }
+}
+
+// Arm the brain for a conversational reply, run it, then follow the brain's lead.
+template <typename F> static void chat_reply(const char* id, F body) {
+    uint8_t act = ACT_SAY;
+    for (const IntentAct& ia : INTENT_ACTS)
+        if (!strcmp(ia.id, id)) { act = ia.act; if (ia.feel) chat.user_feel = ia.feel; break; }
+    uint32_t moves_before = chat.moves;
+    g_brain_next = 0;
+    g_brain_ctx = BrainCtx{act, feel_idx(), (uint8_t)(chat.turn > 2 ? 2 : chat.turn), true};
+    body();
+    g_brain_ctx = BrainCtx{};                         // never leak an armed context
+    if (chat.moves == moves_before && g_brain_next) chat_followup(g_brain_next);
+    Serial.printf("FOX: chat %s act=%s feel=%s turn=%u next=%u\n", id,
+                  BRAIN_ACT_NAMES[act], chat.user_feel.length() ? chat.user_feel.c_str() : "none",
+                  (unsigned)chat.turn, (unsigned)g_brain_next);
+}
+static void chat_intent(const char* id)    { chat_reply(id, [&]{ chat_intent_body(id); }); }
+static void converse_topic(const char* id) { chat_reply(id, [&]{ converse_topic_body(id); }); }
+
+// Turn counting: an exchange within a minute of the last one continues the
+// conversation; otherwise it's a fresh one (turn 0, feelings forgotten).
+static void chat_user_spoke() {
+    uint32_t now = millis();
+    if (chat.last_user && now - chat.last_user < 60000) { if (chat.turn < 250) ++chat.turn; }
+    else { chat.turn = 0; chat.user_feel = ""; }
+    chat.last_user = now;
+}
+
 static uint8_t s_miss_streak = 0;
 static void converse_unheard(size_t samples) {
     uint32_t ms = (uint32_t)(samples * 1000ULL / SAMPLE_RATE);
-    static const char* SHORT_R[] = {"mm?", "hehe", "oh?", "really?", "*tilts head*"};
-    static const char* LONG_R[]  = {"ooh, tell me more!", "wow, and then what?", "i'm listening~", "*ears perk up* go on", "that sounds like a lot"};
-    static const char* ASK[]     = {"how are you feeling?", "want to play something?", "what's on your mind?", "did something happen today?"};
+    static const char* SHORT_R[] = {"mm?", "hehe", "oh?", "really?", "*tilts head*", "hmm?"};
+    static const char* LONG_R[]  = {"ooh, tell me more!", "wow, and then what?", "i'm listening~",
+                                    "*ears perk up* go on", "that sounds like a lot", "mm-hm, mm-hm"};
     FoxMood m = fox_mood(needs);
     needs_interact(needs, false);
     ++s_miss_streak;
+    uint32_t moves_before = chat.moves;
+    g_brain_next = 0;
+    g_brain_ctx = BrainCtx{ACT_UNHEARD, feel_idx(), (uint8_t)(chat.turn > 2 ? 2 : chat.turn), true};
     if (m == MOOD_SLEEPY) speak("*sleepy blink* mmh?");
     else speak(ms > 1800 ? pick_line(LONG_R) : pick_line(SHORT_R));
+    g_brain_ctx = BrainCtx{};
     if (s_miss_streak >= 3) {
+        // Hint with REAL registered phrases (never a stale hard-coded list).
         s_miss_streak = 0;
-        speak("i know words like: play with me, tell me a joke, scan wifi, and what time is it");
-    } else if (esp_random() % 2) {
-        if (esp_random() % 2) chat_ask_question(); else chat_offer_activity();
+        String hint = "you can say things like: ";
+        for (int k = 0; k < 3; ++k) {
+            const Command& c = COMMANDS[esp_random() % COMMAND_COUNT];
+            String ph = c.phrases; int semi = ph.indexOf(';'); if (semi > 0) ph = ph.substring(0, semi);
+            hint += ph; hint += (k < 1) ? ", " : (k < 2 ? ", or " : "");
+        }
+        speak(hint);
+        return;
     }
+    if (chat.moves == moves_before && g_brain_next) chat_followup(g_brain_next);
+}
+
+
+// ---- spontaneous "fox time": every so often the fox ASKS to do something, and
+//      times out gracefully if ignored. A proposal is just a chat offer with a
+//      deadline; one of several flavours is chosen by what it's "feeling".
+static uint32_t s_next_foxtime = 0;
+
+static void foxtime_schedule() {
+    s_next_foxtime = millis() + 60000 + (esp_random() % 120000);   // 1-3 min
+}
+static void foxtime_propose() {
+    FoxMood m = fox_mood(needs);
+    struct P { const char* line; const char* action; const char* why; };
+    static const P PLAY[] = {
+        {"hey... wanna give me a treat? say yes~",            "feed",        "because a snack would make my tail wag"},
+        {"i'm in a pet-me mood. wanna pet me? say yes",       "pet",         "because pets are the best"},
+        {"feeling playful! tug of war? say yes",              "tug",         "because i've got the zoomies"},
+        {"wanna play a quick game together? say yes",         "random_game", "because playing with you is my favorite"},
+    };
+    static const P CALM[] = {
+        {"ooh, wanna see some pretty lights? say yes",        "plasma",      "because calm colors are nice"},
+        {"i could tell you a fox fact. wanna hear it? say yes","c_fact",     "because i just remembered a good one"},
+        {"wanna hear a little story? say yes",                "c_story",     "because story time is cozy"},
+    };
+    const P* pool = (m == MOOD_SLEEPY || m == MOOD_GRUMPY) ? CALM : PLAY;
+    int n = (m == MOOD_SLEEPY || m == MOOD_GRUMPY) ? 3 : 4;
+    const P& p = pool[esp_random() % n];
+    chat_offer(p.line, p.action, p.why);         // a plain "yes" accepts it
+    s_proposal_at = millis() + 15000;            // 15s to respond, then let it go
+    face_caption("(say yes!)");
+}
+static void foxtime_tick() {
+    uint32_t now = millis();
+    // a pending proposal that timed out: shrug, don't trap the user
+    if (s_proposal_at && now > s_proposal_at) {
+        s_proposal_at = 0;
+        if (chat.offer) {                        // still unanswered
+            chat.offer = nullptr;
+            static const char* S[] = {"...okay, maybe later~", "no? that's okay", "*flops down* later then"};
+            face_caption(""); speak(S[esp_random() % 3]);
+        }
+        foxtime_schedule();
+        return;
+    }
+    if (s_proposal_at) return;                   // waiting on the user
+    if (!s_next_foxtime) { foxtime_schedule(); return; }
+    if (now < s_next_foxtime) return;
+    // only butt in when idle and awake enough to be cute, never mid-task
+    if (now - last_activity < 15000) { s_next_foxtime = now + 20000; return; }
+    foxtime_propose();
 }
 
 static void do_action(const char* action) {
@@ -1052,7 +1358,7 @@ static void do_action(const char* action) {
 // Turn a transcript into a reply. Cloud if available, else reflection/templates.
 // Does the transcript contain one of the fox's own phrases? Then do it locally
 // (reliable, instant, works with the real tools) instead of asking the LLM.
-static const char* match_local_phrase(const String& text) {
+static const char* match_local_phrase(const String& text, bool loose = false) {
     String low; low.reserve(text.length());
     for (size_t i = 0; i < text.length(); ++i) {
         char c = tolower((unsigned char)text[i]);
@@ -1073,7 +1379,8 @@ static const char* match_local_phrase(const String& text) {
             if (low.indexOf(needle) < 0 || k <= best_len) continue;
             // Conversation phrases only win when they ARE most of the sentence;
             // otherwise the online brain answers ("why is the sky blue" is not "why").
-            if (COMMANDS[i].id >= 60 && (int)k * 10 < ((int)low.length() - 2) * 6) continue;
+            // (loose = the LLM is unavailable: any conversational phrase counts.)
+            if (!loose && COMMANDS[i].id >= 60 && (int)k * 10 < ((int)low.length() - 2) * 6) continue;
             best = COMMANDS[i].action; best_len = k;
         }
     }
@@ -1083,17 +1390,31 @@ static const char* match_local_phrase(const String& text) {
 static void handle_free_text(const String& text) {
     if (!text.length()) { speak(fox_idle_line(fox_mood(needs))); return; }
     if (cfg.persistence) mem_append("you", text);
+    // 1) the fox's own commands/tools always run locally (no LLM needed)
     if (const char* act = match_local_phrase(text)) {
         Serial.printf("FOX: transcript matched local action '%s'\n", act);
         do_action(act);
         return;
     }
-    String reply = cloud_chat(text);
-    if (!reply.length()) {
-        String low = text; low.toLowerCase();
-        reply = fox_reflect(low);
+    // 2) the online brain, if a free model has budget left
+    if (llm_available()) {
+        String reply = cloud_chat(text);
+        if (reply.length()) { s_llm_rest_told = false; speak(reply); return; }
     }
-    speak(reply);
+    // 3) online brain resting (free-tier limit / no credits / offline): the
+    //    offline conversation brain answers, using the transcript to pick the
+    //    intent (more accurate than MultiNet alone).
+    if (!s_llm_rest_told && cloud_brain()) {
+        s_llm_rest_told = true;
+        speak("my online brain needs a rest, so i'll think with my offline brain for now");
+    }
+    if (const char* act = match_local_phrase(text, true)) {
+        Serial.printf("FOX: offline brain took '%s'\n", act);
+        do_action(act);
+        return;
+    }
+    size_t words = 1; for (size_t i = 0; i < text.length(); ++i) if (text[i] == ' ') ++words;
+    converse_unheard((size_t)words * SAMPLE_RATE * 4 / 10);   // ~0.4s per word: short vs long reply
 }
 
 // ============================================================================
@@ -1122,7 +1443,9 @@ static void process_utterance(int16_t* audio, size_t n) {
                       (unsigned)(n * 1000ULL / SAMPLE_RATE), (int)peak, (unsigned)(n ? sum / n : 0));
     }
     // Offline command grammar first (needs model partition + MultiNet).
-    int id = speech_ready ? recognize_offline(audio, n) : -1;
+    chat_user_spoke();
+    int guess_id = -1; float guess_prob = 0;
+    int id = speech_ready ? recognize_offline(audio, n, &guess_id, &guess_prob) : -1;
     const char* act = nullptr;
     for (size_t i = 0; id >= 0 && i < COMMAND_COUNT; ++i)
         if (COMMANDS[i].id == id) { act = COMMANDS[i].action; break; }
@@ -1135,6 +1458,20 @@ static void process_utterance(int16_t* audio, size_t n) {
         if (tx.length()) { s_miss_streak = 0; handle_free_text(tx); return; }
     }
     if (act) { s_miss_streak = 0; do_action(act); return; }
+    // Recognition and conversation working together: a half-confident match is
+    // CONFIRMED instead of guessed or ignored. "yes" runs it via the offer.
+    if (guess_id >= 0 && guess_prob >= 0.15f) {
+        for (size_t i = 0; i < COMMAND_COUNT; ++i) {
+            if (COMMANDS[i].id != guess_id) continue;
+            String first = COMMANDS[i].phrases;
+            int semi = first.indexOf(';'); if (semi > 0) first = first.substring(0, semi);
+            s_miss_streak = 0;
+            g_brain_ctx = BrainCtx{ACT_CONFIRM, feel_idx(), (uint8_t)(chat.turn > 2 ? 2 : chat.turn), true};
+            chat_offer(String("did you mean, ") + first + "?", COMMANDS[i].action,
+                       "because i wasn't totally sure i heard you");
+            return;
+        }
+    }
     if (!speech_ready) Serial.println("FOX: speech model not loaded — replying conversationally");
     converse_unheard(n);
 }
@@ -1262,6 +1599,7 @@ void loop() {
 
 
     // --- Button: HOLD = talk, DOUBLE = menu, single TAP = pet/boop ---------
+    foxtime_tick();
     ButtonEvent ev = input_button_event();
     if (ev == BTN_HOLD_START) {
         face_listen();

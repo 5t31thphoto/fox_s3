@@ -12,11 +12,12 @@ struct Foxese {
     uint8_t style = 0;
     uint8_t gesture = 0;
     uint8_t intensity = 0;
+    uint8_t next = 0;        // v2: conversational next move (0 none,1 ask,2 offer,3 fact,4 check-in)
     bool valid = false;
 };
 
 String foxese_encode(uint8_t mood, uint8_t fact_id, uint8_t style,
-                     uint8_t gesture, uint8_t intensity);
+                     uint8_t gesture, uint8_t intensity, uint8_t next = 0);
 bool foxese_parse(const String& packet, Foxese& out);
 String foxese_expand(const Foxese& x, const String& fact);
 uint8_t foxese_fact_id(const String& fact);

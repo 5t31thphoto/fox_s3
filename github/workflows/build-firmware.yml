@@ -48,8 +48,14 @@ jobs:
         run: pip install "numpy>=1.26"
       - name: Train brain packs (FOXB) — CPU numpy, no torch
         run: |
-          python tools/train_brain.py --pack A --out firmware/main/data/foxbrainA.bin --steps 6000
-          python tools/train_brain.py --pack B --out firmware/main/data/foxbrainB.bin --steps 5000
+          # Brain v2: learns the conversation policy (style/gesture/intensity/
+          # next-move). ~65s per pack on one core; prints policy agreement.
+          python tools/train_brain.py --pack A --out firmware/main/data/foxbrainA.bin --steps 9000
+          python tools/train_brain.py --pack B --out firmware/main/data/foxbrainB.bin --steps 9000
+          # The firmware's no-model fallback uses the SAME policy as a C table
+          # (committed as firmware/main/brain_policy.h). Fail if they drift.
+          python tools/train_brain.py --emit-policy /tmp/brain_policy.h
+          diff -q /tmp/brain_policy.h firmware/main/brain_policy.h || { echo "::error::brain_policy.h is stale: run tools/train_brain.py --emit-policy firmware/main/brain_policy.h"; exit 1; }
       - uses: actions/upload-artifact@v4
         with:
           name: fox-data
@@ -78,6 +84,12 @@ jobs:
           name: fox-data
           path: firmware/main/data
 
+      - name: Precompute MultiNet phonemes (Espressif's recommended g2p)
+        continue-on-error: true      # on failure the committed empty table = runtime G2P
+        run: |
+          python3 -m pip install --quiet g2p_en nltk
+          python3 tools/gen_mn_phonemes.py
+          grep -c '^    {"' firmware/main/mn_phonemes.h || true
       - uses: espressif/esp-idf-ci-action@v1
         with:
           esp_idf_version: v5.5.2

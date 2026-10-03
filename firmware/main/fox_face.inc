@@ -255,6 +255,8 @@ static void face_lipsync_from_mic_once() {
 void face_lipsync_mode() {
     audio_speaker_end();
     if (!g_echo_ok) return;
+    audio_mic_speech_gain(false);   // puppet gain, regardless of prior PTT state
+
     while (true) {
         M5.update();
         if (M5.BtnA.wasClicked()) break;

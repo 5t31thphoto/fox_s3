@@ -38,6 +38,19 @@ static void ble_begin_once() {
     ble_initialized = true;
 }
 
+// Take the shared radio for an RF app from a KNOWN clean state. Any previous
+// mode (STA connect, promiscuous, BLE scan) is fully torn down first, so the
+// next tool never inherits a half-open radio (that silenced the sniffers).
+static void tool_radio_acquire() {
+    esp_wifi_set_promiscuous(false);
+    esp_wifi_set_promiscuous_rx_cb(NULL);
+    WiFi.scanDelete();
+    if (ble_scan) { ble_scan->stop(); ble_scan->clearResults(); }
+    WiFi.disconnect(true, false);
+    WiFi.mode(WIFI_OFF);
+    delay(80);
+}
+
 static void tool_radio_release() {
     // Return the shared radio hardware to a neutral state after every RF app.
     WiFi.scanDelete();
@@ -342,8 +355,9 @@ static void radar_draw(float green, float red, bool wifi, RadarPhase ph, float h
 static void radar_run(bool wifi) {
   for (;;) {
     radar_reset();
-    if (wifi) { WiFi.mode(WIFI_STA); WiFi.disconnect(false, false); delay(50); }
-    else      { WiFi.mode(WIFI_OFF); delay(50); ble_begin_once(); }
+    tool_radio_acquire();
+    if (wifi) { WiFi.mode(WIFI_STA); WiFi.disconnect(true, false); esp_wifi_start(); delay(80); }
+    else      { ble_begin_once(); }
     speak("hold me still, then turn around once. keep the green needle on the red one~");
 
     RadarHeading hd;
@@ -452,6 +466,24 @@ static uint32_t pwn_score = 0, pwn_level = 1;
 
 static inline uint16_t le16(const uint8_t* p) { return p[0] | (p[1] << 8); }
 
+// Promiscuous capture needs the WiFi driver actually RUNNING (not just
+// WiFi.mode). The radar leaves WiFi off/STA, so each sniffer explicitly starts
+// the stack, disconnects, and installs a filter for the frame types it wants.
+static void sniff_wifi_up(uint32_t types) {
+    WiFi.disconnect(true, false);
+    WiFi.mode(WIFI_STA);
+    esp_wifi_start();
+    esp_wifi_set_promiscuous(false);              // clear any prior session
+    delay(60);
+    wifi_promiscuous_filter_t filt = { .filter_mask = types };
+    esp_wifi_set_promiscuous_filter(&filt);
+    esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
+}
+static void sniff_wifi_down() {
+    esp_wifi_set_promiscuous(false);
+    esp_wifi_set_promiscuous_rx_cb(NULL);
+}
+
 // Inspect a raw 802.11 frame for the pwnagotchi-relevant bits. Best-effort and
 // tolerant: if the layout isn't what we expect we just skip it.
 static void pwn_inspect(const uint8_t* pkt, int len) {
@@ -513,11 +545,14 @@ static void pwn_update_level() {
 
 void tool_menu_sniffer() {
     speak("passive sniff mode. i only listen~");
-    WiFi.mode(WIFI_STA); WiFi.disconnect();
-    esp_wifi_set_promiscuous(true);
+    tool_radio_acquire();
+    sniff_mgmt = sniff_data = sniff_ctrl = 0;
+    pwn_open_beacons = pwn_eapol = pwn_pmkid = pwn_probes = 0;
+    sniff_wifi_up(WIFI_PROMIS_FILTER_MASK_MGMT | WIFI_PROMIS_FILTER_MASK_DATA | WIFI_PROMIS_FILTER_MASK_CTRL);
     esp_wifi_set_promiscuous_rx_cb(&sniffer_cb);
+    esp_wifi_set_promiscuous(true);
     int ch = 1;
-    uint32_t last = 0;
+    uint32_t last = 0, started = millis();
     while (true) {
         M5.update();
         if (M5.BtnA.wasClicked() || M5.BtnA.wasDoubleClicked()) break;
@@ -530,6 +565,9 @@ void tool_menu_sniffer() {
         face_canvas->fillSprite(cfg.color_bg);
         face_canvas->setTextColor(cfg.color_accent); face_canvas->setTextDatum(top_left);
         face_canvas->drawString("HUNT ch" + String(ch) + "  Lv" + String(pwn_level), 4, 2);
+        face_canvas->setTextColor(0x8410); face_canvas->setTextDatum(top_right);
+        face_canvas->drawString(String(sniff_mgmt + sniff_data + sniff_ctrl) + "pkt", 124, 2);
+        face_canvas->setTextDatum(top_left);
         auto bar = [&](int y, const String& lbl, uint32_t v, uint16_t c) {
             int w = (int)min(v, (uint32_t)116);
             face_canvas->fillRect(4, y + 9, w, 7, c);
@@ -546,10 +584,14 @@ void tool_menu_sniffer() {
         face_canvas->pushSprite(0, 0);
         delay(40);
     }
-    esp_wifi_set_promiscuous(false);
-    // report — and forget: nothing is written to flash.
-    speak(String("i heard ") + pwn_eapol + " handshakes and " +
-          pwn_open_beacons + " open nets. all in my head, nothing saved~");
+    sniff_wifi_down();
+    tool_radio_release();
+    uint32_t total = sniff_mgmt + sniff_data + sniff_ctrl;
+    if (total == 0)
+        speak("hmm, i didn't catch any packets that time. the radio might be busy~");
+    else
+        speak(String("i heard ") + pwn_eapol + " handshakes and " +
+              pwn_open_beacons + " open nets. all in my head, nothing saved~");
     sniff_mgmt = sniff_data = sniff_ctrl = 0;
     pwn_open_beacons = pwn_eapol = pwn_pmkid = pwn_probes = 0;
 }
@@ -581,10 +623,11 @@ static void probe_cb(void* buf, wifi_promiscuous_pkt_type_t type) {
 
 void tool_menu_probe_sniff() {
     speak("listening for what phones are looking for~");
+    tool_radio_acquire();
     probe_count = 0;
-    WiFi.mode(WIFI_STA); WiFi.disconnect();
-    esp_wifi_set_promiscuous(true);
+    sniff_wifi_up(WIFI_PROMIS_FILTER_MASK_MGMT);
     esp_wifi_set_promiscuous_rx_cb(&probe_cb);
+    esp_wifi_set_promiscuous(true);
     int ch = 1; uint32_t last = 0;
     while (true) {
         M5.update();
@@ -601,6 +644,8 @@ void tool_menu_probe_sniff() {
         face_canvas->pushSprite(0, 0);
         delay(40);
     }
-    esp_wifi_set_promiscuous(false);
-    speak(String("saw ") + probe_count + " different network names being sought");
+    sniff_wifi_down();
+    tool_radio_release();
+    speak(probe_count ? (String("saw ") + probe_count + " different network names being sought")
+                      : String("no probe requests that time. phones nearby must be quiet~"));
 }

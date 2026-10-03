@@ -13,8 +13,8 @@ extern FoxConfig cfg;
 String net_weather() {
     if (cfg.weather.isEmpty() || !wifi_connect())
         return "i can't check the weather right now";
-    WiFiClientSecure c; c.setInsecure();
-    HTTPClient h;
+    WiFiClientSecure c; c.setInsecure(); c.setHandshakeTimeout(10);
+    HTTPClient h; h.setConnectTimeout(6000);
     if (!h.begin(c, "https://wttr.in/" + cfg.weather + "?format=%C+%t"))
         return "weather is being shy";
     String out = (h.GET() == 200) ? h.getString() : String("");
@@ -28,7 +28,7 @@ String net_bitcoin_price() {
     if (!wifi_connect()) return "i can't check prices without wifi";
     float usd = 0;
     {
-        WiFiClientSecure c; c.setInsecure(); HTTPClient h;
+        WiFiClientSecure c; c.setInsecure(); c.setHandshakeTimeout(10); HTTPClient h; h.setConnectTimeout(6000);
         if (h.begin(c, "https://api.coinbase.com/v2/prices/BTC-USD/spot")) {
             h.setTimeout(8000);
             if (h.GET() == 200) { JsonDocument d; if (!deserializeJson(d, h.getString())) usd = d["data"]["amount"].as<String>().toFloat(); }
@@ -36,7 +36,7 @@ String net_bitcoin_price() {
         }
     }
     if (usd <= 0) {
-        WiFiClientSecure c; c.setInsecure(); HTTPClient h;
+        WiFiClientSecure c; c.setInsecure(); c.setHandshakeTimeout(10); HTTPClient h; h.setConnectTimeout(6000);
         if (h.begin(c, "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd")) {
             h.setTimeout(8000);
             if (h.GET() == 200) { JsonDocument d; if (!deserializeJson(d, h.getString())) usd = d["bitcoin"]["usd"].as<float>(); }
@@ -77,8 +77,8 @@ static float kp_of(JsonVariant row, String* kind, String* scale) {
 static KpOutlook noaa_kp_outlook() {
     KpOutlook k;
     if (!wifi_connect()) return k;
-    WiFiClientSecure c; c.setInsecure();
-    HTTPClient h;
+    WiFiClientSecure c; c.setInsecure(); c.setHandshakeTimeout(10);
+    HTTPClient h; h.setConnectTimeout(6000);
     if (!h.begin(c, "https://services.swpc.noaa.gov/products/noaa-planetary-k-index-forecast.json")) return k;
     h.setTimeout(10000);
     int code = h.GET();
@@ -138,7 +138,7 @@ static bool fox_location() {
     s_loc_ok = false;
     if (!wifi_connect()) return false;
     if (cfg.weather.length()) {
-        WiFiClientSecure c; c.setInsecure(); HTTPClient h;
+        WiFiClientSecure c; c.setInsecure(); c.setHandshakeTimeout(10); HTTPClient h; h.setConnectTimeout(6000);
         if (h.begin(c, "https://wttr.in/" + cfg.weather + "?format=j1")) {
             h.setTimeout(12000);
             if (h.GET() == 200) {
@@ -161,7 +161,7 @@ static bool fox_location() {
         }
     }
     if (!s_loc_ok) {                                   // fallback: IP geolocation
-        WiFiClient c; HTTPClient h;
+        WiFiClient c; HTTPClient h; h.setConnectTimeout(6000);
         if (h.begin(c, "http://ip-api.com/json/?fields=status,lat,lon,city")) {
             h.setTimeout(8000);
             if (h.GET() == 200) {
@@ -194,7 +194,7 @@ static AuroraHere noaa_ovation_at(float lat, float lon) {
     const int tlon = ((int)lroundf(lon) % 360 + 360) % 360;
     const int tlat = (int)lroundf(lat);
     const int pole = lat >= 0 ? 1 : -1;                // look toward your pole
-    WiFiClientSecure c; c.setInsecure(); HTTPClient h;
+    WiFiClientSecure c; c.setInsecure(); c.setHandshakeTimeout(10); HTTPClient h; h.setConnectTimeout(6000);
     h.useHTTP10(true);                                  // plain (non-chunked) body for streaming
     if (!h.begin(c, "https://services.swpc.noaa.gov/json/ovation_aurora_latest.json")) return r;
     h.setTimeout(15000);

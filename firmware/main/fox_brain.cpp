@@ -11,10 +11,11 @@
 // or unsure, these templates are the voice of the fox.
 #include "fox.h"
 #include "fox_decls.h"
+#include "foxese.h"
 #include <esp_random.h>
 
 // forward decl from fox_llm.cpp (weak — may be a stub that returns "")
-String llm_flavour(const String& fact, FoxMood mood, const FoxConfig& cfg);
+bool brain_decide(FoxMood mood, const BrainCtx& ctx, Foxese& x);
 
 static uint32_t pick(uint32_t n) { return n ? (esp_random() % n) : 0; }
 
@@ -48,36 +49,28 @@ void needs_interact(FoxNeeds& n, bool played) {
 
 // ---- mood-flavoured decoration ---------------------------------------------
 // Prefixes / suffixes that carry emotion without changing the fact.
-static const char* PRE_SLEEPY[]  = {"*yawn* ", "mmn... ", "*stretches* "};
-static const char* PRE_HAPPY[]   = {"", "ooh! ", "hehe, ", "okay~ "};
-static const char* PRE_EXCITED[] = {"yes yes! ", "ooh ooh! ", "*ears perk* ", "!! "};
-static const char* PRE_GRUMPY[]  = {"*hmf* ", "fine. ", "...", "*flicks tail* "};
-static const char* SUF_HAPPY[]   = {"", " ^^", " ~", ""};
-static const char* SUF_EXCITED[] = {" !!", " hehe~", "!"};
-static const char* SUF_SLEEPY[]  = {" ...", " *nods off*", "..."};
-static const char* SUF_GRUMPY[]  = {".", " hmph.", ""};
 
 template <size_t N>
 static const char* one(const char* const (&arr)[N]) { return arr[pick(N)]; }
 
 // The core: dress a plain fact in the current mood. When the tiny LLM is
 // available it gets first crack, but its output is still bounded to the fact.
-String fox_dress(const String& fact, FoxMood mood, const FoxConfig& cfg) {
-    // Give the on-device model a chance (returns "" if absent/unsure).
-    String flav = llm_flavour(fact, mood, cfg);
-    String body = flav.length() ? flav : fact;
+BrainCtx g_brain_ctx;
+uint8_t  g_brain_next = 0;
 
-    const char* pre = "";
-    const char* suf = "";
-    switch (mood) {
-        case MOOD_SLEEPY:  pre = one(PRE_SLEEPY);  suf = one(SUF_SLEEPY);  break;
-        case MOOD_HAPPY:   pre = one(PRE_HAPPY);   suf = one(SUF_HAPPY);   break;
-        case MOOD_EXCITED: pre = one(PRE_EXCITED); suf = one(SUF_EXCITED); break;
-        case MOOD_GRUMPY:  pre = one(PRE_GRUMPY);  suf = one(SUF_GRUMPY);  break;
-        default: break;
-    }
-    String out = String(pre) + body + String(suf);
-    return out;
+// Every spoken line passes through here exactly once. The brain decides the
+// delivery (and, for an ARMED conversational line, the next move); Foxese
+// renders it. One decoration path — nothing is stacked twice.
+String fox_dress(const String& fact, FoxMood mood, const FoxConfig& cfg) {
+    (void)cfg;
+    BrainCtx ctx = g_brain_ctx;
+    bool armed = ctx.armed;
+    g_brain_ctx = BrainCtx{};                 // one-shot: later lines default to "say"
+    Foxese x;
+    if (!brain_decide(mood, ctx, x)) return fact;
+    if (armed) g_brain_next = x.next;         // only conversational replies steer
+    String out = foxese_expand(x, fact);
+    return out.length() ? out : fact;
 }
 
 // ---- ELIZA-style reflection for offline "conversation" ----------------------

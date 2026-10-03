@@ -270,37 +270,46 @@ static int token_for_piece(const char* piece) {
     return -1;
 }
 
-static int pick_hex04(const float* logits) {
-    int best = -1; float bv = -INFINITY;
-    for (int d = 0; d < 4; ++d) {
+// Choose a digit 0..maxd from the logits, sampling at temperature `temp`
+// among ONLY the allowed digits (constrained decoding: the packet is always
+// well-formed). temp <= 0 -> greedy.
+static int pick_digit(const float* logits, int maxd, float temp) {
+    int ids[10]; float w[10]; int n = 0; float mx = -1e30f;
+    for (int d = 0; d <= maxd && d < 10; ++d) {
         char c[2] = { char('0' + d), 0 };
         int id = token_for_piece(c);
-        if (id >= 0 && logits[id] > bv) { bv = logits[id]; best = id; }
+        if (id < 0) continue;
+        ids[n] = id; w[n] = logits[id]; if (w[n] > mx) mx = w[n]; ++n;
     }
-    return best;
+    if (!n) return -1;
+    if (temp <= 0.0f) { int best = 0; for (int i = 1; i < n; ++i) if (w[i] > w[best]) best = i; return ids[best]; }
+    float sum = 0; for (int i = 0; i < n; ++i) { w[i] = expf((w[i] - mx) / temp); sum += w[i]; }
+    float r = (esp_random() / 4294967296.0f) * sum;
+    for (int i = 0; i < n; ++i) { r -= w[i]; if (r <= 0) return ids[i]; }
+    return ids[n - 1];
 }
 
-static String llm_foxese_tail(const String& prompt) {
+// FOXESE v2 decision tail: "S<0-7>G<0-7>E<0-3>N<0-4>" (8 bytes).
+static String llm_foxese_tail(const String& prompt, float temp) {
     if (!M.ready) return "";
     resolve_weights();
     int cap = M.h.seq_len;
     int* toks = (int*)malloc(sizeof(int) * cap);
     if (!toks) return "";
     int n = encode(prompt, toks, cap);
-    if (n == 0 || n >= cap - 6) { free(toks); return ""; }
+    if (n == 0 || n >= cap - 8) { free(toks); return ""; }
 
     int pos = 0, token = toks[0];
     for (; pos < n - 1; ++pos) { forward(token, pos); token = toks[pos + 1]; }
     String out;
-    const char* fixed[] = {"S", nullptr, "G", nullptr, "E", nullptr};
-    for (int k = 0; k < 6; ++k) {
+    static const char* const LET[4] = {"S", "G", "E", "N"};
+    static const int MAXD[4] = {7, 7, 3, 4};
+    for (int k = 0; k < 8; ++k) {
         const float* logits = forward(token, pos);
-        int next = -1;
-        if ((k & 1) == 0) next = token_for_piece(fixed[k]);
-        else next = pick_hex04(logits);
+        int next = (k & 1) == 0 ? token_for_piece(LET[k >> 1])
+                                : pick_digit(logits, MAXD[k >> 1], temp);
         if (next < 0) { free(toks); return ""; }
-        const char* piece = V.tok[next];
-        out += piece; token = next; ++pos;
+        out += V.tok[next]; token = next; ++pos;
     }
     free(toks);
     return out;

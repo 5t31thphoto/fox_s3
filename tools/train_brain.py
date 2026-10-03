@@ -25,32 +25,160 @@ lines like:
 import sys, os, struct, argparse, math, time
 import numpy as np
 
-MOODS = ["sleepy", "calm", "happy", "excited", "grumpy"]
+MOODS = ["sleepy", "calm", "happy", "excited", "grumpy"]      # == enum FoxMood
 
-FACTS = [
-    "the time is now", "it is sunny", "it is raining", "it is cloudy",
-    "battery is low", "battery is full", "the tv is off", "the tv is on",
-    "found your remote", "message from a friend", "it is morning",
-    "it is night", "you have been away", "the volume is up",
-    "the volume is down", "the light is on", "the light is off",
-    "a brand new day", "time to rest", "i saved that", "i remember you",
-    "let us play", "i missed you", "all done", "ready to go",
-]
+# ============================================================================
+#  FOXESE v2 — what the brain DECIDES.
+#  Input  : "[mood] <act> <feel> t<turn> -> "     (the conversational situation)
+#  Output : "S<style>G<gesture>E<intensity>N<next>\n"
+#
+#  The firmware owns every word. The brain decides HOW the fox says it (style,
+#  gesture, intensity) and WHAT HAPPENS NEXT in the conversation (next move),
+#  which the offline conversation engine executes. These tables are the ABI:
+#  their order must match firmware (fox.h FoxAct / brain_policy.h).
+# ============================================================================
+ACTS = ["greet", "farewell", "comfort", "celebrate", "care", "answer", "joke",
+        "story", "fact", "compliment", "affection", "playful", "sulk", "thanks",
+        "apology", "agree", "decline", "curious", "ask", "offer", "report",
+        "confirm", "unheard", "idle", "react", "say"]
+FEELS = ["none", "sad", "happy", "tired", "hungry", "scared", "cold", "lonely"]
+TURNS = 3                                   # t0 first exchange, t1, t2 = 2+
+# styles   0 plain 1 bubbly 2 tender 3 silly 4 shy 5 dramatic 6 drowsy 7 sassy
+# gestures 0 still 1 wag 2 perk 3 tilt 4 nuzzle 5 bounce 6 flop 7 squint
+# next     0 none 1 ask 2 offer 3 fact 4 check-in
+SIBLING = {0: 0, 1: 3, 2: 4, 3: 1, 4: 2, 5: 1, 6: 6, 7: 7}
 
-# FOXESE is the on-device semantic IR.  The transformer does NOT generate
-# prose anymore: it emits a compact, printable semantic packet.  Firmware
-# expands that packet into speech/animation and keeps the original fact text.
-# Packet: F1 M<0..4> F<00..FF> S<0..3> G<0..3> E<0..3>\n#   M mood, F fact reference, S delivery style, G gesture, E intensity.
-STYLE = {
-    "sleepy":  [0, 1, 2, 3],
-    "calm":    [0, 1, 2, 3],
-    "happy":   [0, 1, 2, 3],
-    "excited": [0, 1, 2, 3],
-    "grumpy":  [0, 1, 2, 3],
-}
 
-MOOD_ID = {m:i for i,m in enumerate(MOODS)}
-FACT_ID = {f:i for i,f in enumerate(FACTS)}
+def policy(mood, act, feel, turn, persona):
+    """Primary decision for a situation. persona 'A' = Chatterbox (talks,
+    asks), 'B' = Critter (sillier, offers play). Returns (S, G, E, N)."""
+    m = MOODS[mood]; a = ACTS[act]; f = FEELS[feel]
+    # ---- style --------------------------------------------------------------
+    S = {"sleepy": 6, "calm": 0, "happy": 1, "excited": 1, "grumpy": 7}[m]
+    if a == "comfort":
+        S = 2
+    elif a in ("affection", "compliment"):
+        S = {"sleepy": 2, "calm": 4, "happy": 1, "excited": 1, "grumpy": 4}[m]
+    elif a in ("joke", "playful", "react"):
+        S = {"sleepy": 6, "grumpy": 7}.get(m, 3)
+    elif a == "story":
+        S = {"sleepy": 6, "grumpy": 7}.get(m, 5)
+    elif a == "celebrate":
+        S = {"excited": 5, "sleepy": 6, "grumpy": 4}.get(m, 1)
+    elif a == "sulk":
+        S = 6 if m == "sleepy" else 7
+    elif a in ("care", "apology"):
+        S = 4 if a == "apology" else (2 if m in ("calm", "happy", "sleepy") else S)
+    elif a == "farewell":
+        S = {"excited": 5, "grumpy": 7}.get(m, 2)
+    elif a in ("confirm", "unheard", "curious"):
+        S = {"sleepy": 6, "grumpy": 7, "excited": 1}.get(m, 0)
+    if persona == "B" and S == 0 and a in ("greet", "idle", "react", "playful", "joke"):
+        S = 3                                   # Critter: sillier by default
+    # ---- gesture ------------------------------------------------------------
+    G = {"greet": 1, "farewell": 1, "comfort": 4, "celebrate": 5, "care": 4,
+         "answer": 2, "joke": 1, "story": 2, "fact": 2, "compliment": 1,
+         "affection": 4, "playful": 1, "sulk": 7, "thanks": 1, "apology": 4,
+         "agree": 1, "decline": 3, "curious": 3, "ask": 3, "offer": 2,
+         "report": 2, "confirm": 3, "unheard": 3, "idle": 0, "react": 1,
+         "say": 0}[a]
+    if m == "excited" and G in (1, 0): G = 5
+    if m == "sleepy" and a not in ("comfort", "affection"): G = 6
+    if m == "grumpy" and a not in ("comfort", "apology"): G = 7
+    if persona == "B" and G == 0: G = 1
+    # ---- intensity ----------------------------------------------------------
+    E = {"sleepy": 0, "calm": 1, "happy": 2, "excited": 3, "grumpy": 1}[m]
+    if a in ("celebrate", "playful", "joke"): E = min(3, E + 1)
+    if a in ("comfort", "care", "apology", "farewell", "confirm", "unheard"): E = min(E, 1)
+    # ---- next move (the conversation steering) ------------------------------
+    N = 0
+    if a == "comfort":
+        N = (2 if turn == 0 else 4) if f in ("sad", "lonely") else 4
+        if turn >= 2: N = 0
+    elif m in ("sleepy", "grumpy"):
+        N = 0                                   # sleepy/grumpy foxes don't push
+    elif turn >= 2:
+        N = 2 if a == "unheard" else 0          # don't over-talk
+    elif a == "greet":       N = 1 if turn == 0 else 0
+    elif a == "celebrate":   N = 1 if turn == 0 else 2
+    elif a == "answer":      N = 1 if turn == 0 else 0
+    elif a == "care":        N = 2 if f == "tired" else 0
+    elif a == "fact":        N = 3 if persona == "B" else 1
+    elif a == "joke":        N = 2 if persona == "B" else 0
+    elif a == "affection":   N = 0 if persona == "B" else (1 if turn == 0 else 0)
+    elif a == "playful":     N = 2 if persona == "B" else 0
+    elif a == "agree":       N = 1 if (persona == "A" and turn == 0) else 0
+    elif a == "decline":     N = 2
+    elif a == "unheard":     N = 1 if turn == 0 else 2
+    elif a == "idle":        N = 2 if (persona == "B" and m in ("happy", "excited")) else 0
+    return S, G, E, N
+
+
+def situations():
+    for mood in range(len(MOODS)):
+        for act in range(len(ACTS)):
+            for feel in range(len(FEELS)):
+                for turn in range(TURNS):
+                    yield mood, act, feel, turn
+
+
+def prompt_of(mood, act, feel, turn):
+    return f"[{MOODS[mood]}] {ACTS[act]} {FEELS[feel]} t{turn} -> "
+
+
+def packet(S, G, E, N):
+    return f"S{S}G{G}E{E}N{N}\n"
+
+
+def build_lines(persona, rng, samples=4):
+    """Each situation appears `samples` times. ~75% primary decision, ~25% a
+    sibling style (and ask<->offer swap), so the model learns calibrated
+    variety the firmware can sample from — not a single canned answer."""
+    lines = []
+    # Conversation-steering acts depend on feel x turn (finer distinctions,
+    # fewer natural samples): oversample them so the next move is learned well.
+    heavy = {ACTS.index(a) for a in ("comfort", "celebrate", "answer", "greet",
+                                      "unheard", "care", "decline", "fact", "agree")}
+    for sit in situations():
+        S, G, E, N = policy(*sit, persona)
+        reps = samples * (3 if sit[1] in heavy else 1)
+        # the most important (and most context-dependent) moment: comforting a
+        # sad/lonely person — first turn offers, later turns check in.
+        if sit[1] == ACTS.index("comfort") and FEELS[sit[2]] in ("sad", "lonely"):
+            reps *= 4
+        for _ in range(reps):
+            s, n = S, N
+            if rng.random() < 0.25:
+                s = SIBLING[S]
+                if n in (1, 2): n = 3 - n
+            lines.append((prompt_of(*sit), packet(s, G, E, n)))
+    rng.shuffle(lines)
+    return lines
+
+
+def emit_policy_header(path):
+    """The SAME policy as a C table for when no brain model is loaded, so the
+    device behaves identically with or without the neural pack."""
+    nm, na, nf = len(MOODS), len(ACTS), len(FEELS)
+    vals = []
+    for sit in situations():
+        S, G, E, N = policy(*sit, "A")
+        vals.append(S | (G << 3) | (E << 6) | (N << 8))
+    with open(path, "w") as f:
+        f.write("// AUTO-GENERATED by tools/train_brain.py --emit-policy. Do not edit.\n")
+        f.write("// Fallback brain policy (persona A): index [mood][act][feel][turn],\n")
+        f.write("// value = S | G<<3 | E<<6 | N<<8.\n#pragma once\n#include <stdint.h>\n")
+        f.write(f"#define BRAIN_N_MOODS {nm}\n#define BRAIN_N_ACTS {na}\n")
+        f.write(f"#define BRAIN_N_FEELS {nf}\n#define BRAIN_N_TURNS {TURNS}\n")
+        f.write("static const uint16_t BRAIN_POLICY[] = {\n")
+        for i in range(0, len(vals), 16):
+            f.write("  " + ", ".join(str(v) for v in vals[i:i+16]) + ",\n")
+        f.write("};\n")
+        f.write("static const char* const BRAIN_ACT_NAMES[] = {" +
+                ", ".join(f'"{a}"' for a in ACTS) + "};\n")
+        f.write("static const char* const BRAIN_FEEL_NAMES[] = {" +
+                ", ".join(f'"{x}"' for x in FEELS) + "};\n")
+    return len(vals)
 
 
 def build_vocab(text):
@@ -58,25 +186,6 @@ def build_vocab(text):
     stoi = {b: i for i, b in enumerate(used)}
     itos = [bytes([b]) for b in used]
     return itos, stoi
-
-
-def build_corpus(repeat):
-    lines = []
-    for f in FACTS:
-        fid = FACT_ID[f]
-        for m in MOODS:
-            mid = MOOD_ID[m]
-            for style in STYLE[m]:
-                # Gesture and intensity are semantic outputs, not text.  The
-                # mapping is deliberately simple enough for a tiny model to
-                # learn while leaving the firmware free to expand it.
-                gesture = (style + mid) & 3
-                intensity = min(3, (mid + style) // 2)
-                packet = f"S{style:X}G{gesture:X}E{intensity:X}\n"
-                # Input remains ordinary text so the tiny brain learns the
-                # association between a real fact/mood and semantic output.
-                lines.append(f"[{m}] {f} [F{fid:02X}] -> {packet}")
-    return "".join(lines * repeat)
 
 
 class Brain:
@@ -142,7 +251,7 @@ class Brain:
         dx = ss * dxhat - (ss ** 3) * x * xdot / n
         return dx, dg
 
-    def step(self, x, y, lr):
+    def step(self, x, y, lr, lmask=None):
         P = self.P; L, H, hs, dim = self.L, self.H, self.hs, self.dim
         Tn = len(x); emb = P["emb"]; h = emb[x].copy(); caches = []
         sm = self.softmax
@@ -167,8 +276,11 @@ class Brain:
                            a1, a3, sig, silu, gg)); h = h2
         xf, ssfin = self.rmsnorm(h, P["g_fin"])
         logits = xf @ emb.T; p = sm(logits, -1)
-        loss = -np.log(p[np.arange(Tn), y] + 1e-9).mean()
-        dl = p.copy(); dl[np.arange(Tn), y] -= 1; dl /= Tn
+        nll = -np.log(p[np.arange(Tn), y] + 1e-9)
+        if lmask is None: lmask = np.ones(Tn)
+        msum = max(1.0, lmask.sum())
+        loss = (nll * lmask).sum() / msum
+        dl = p.copy(); dl[np.arange(Tn), y] -= 1; dl *= (lmask / msum)[:, None]
         demb = dl.T @ xf; dxf = dl @ emb
         dh, dgf = self.drms(dxf, h, P["g_fin"], ssfin); P["g_fin"] -= lr * dgf
         for l in reversed(range(L)):
@@ -275,50 +387,74 @@ def write_foxb(path, b, itos):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--pack", choices=["A", "B"], default="A")
-    ap.add_argument("--out", required=True)
-    ap.add_argument("--steps", type=int, default=6000)
+    ap.add_argument("--out")
+    ap.add_argument("--steps", type=int, default=9000)
     ap.add_argument("--seed", type=int, default=1)
-    ap.add_argument("--repeat", type=int, default=6)
+    ap.add_argument("--emit-policy", metavar="HEADER",
+                    help="write the fallback policy C header and exit")
     args = ap.parse_args()
 
-    text = build_corpus(args.repeat)
+    if args.emit_policy:
+        n = emit_policy_header(args.emit_policy)
+        print(f"train_brain: wrote policy header {args.emit_policy} ({n} situations)")
+        return
+    if not args.out:
+        ap.error("--out is required")
+
+    rng = np.random.default_rng(args.seed)
+    lines = build_lines(args.pack, rng)
+    text = "".join(p + k for p, k in lines)
     itos, stoi = build_vocab(text)
-    data = np.array([stoi[bb] for bb in text.encode()], dtype=np.int64)
     vocab = len(itos)
+    enc = lambda s: [stoi[c] for c in s.encode()]
+    data = [(enc(p), enc(k)) for p, k in lines]
 
     if args.pack == "A":
         b = Brain(dim=64, hidden=128, n_layers=4, n_heads=4, vocab=vocab,
                   seq_len=64, gs=16, seed=args.seed)
     else:
-        # Brain B is wider than A but deliberately compact enough for the 8MB
-        # AtomS3R flash budget after PicoTTS/model/radio assets are installed.
-        # 80-wide x 160 FFN x 3 layers is still ~17% more parameters than A.
         b = Brain(dim=80, hidden=160, n_layers=3, n_heads=5, vocab=vocab,
                   seq_len=96, gs=16, seed=args.seed)
-
     nparam = sum(v.size for _, v in b.P.items())
-    print(f"train_brain: pack {args.pack}  vocab {vocab}  ~{nparam//1000}K params "
-          f"dim={b.dim} L={b.L} H={b.H} seq={b.seq_len}")
+    print(f"train_brain v2: pack {args.pack} ({'Chatterbox' if args.pack == 'A' else 'Critter'})  "
+          f"vocab {vocab}  ~{nparam//1000}K params  training lines {len(lines)}")
 
-    T = min(b.seq_len, 48)
-    t0 = time.time()
-    loss = 0.0
+    # Line-aligned samples; loss ONLY on the decision bytes (the packet), so
+    # all capacity goes to learning the policy instead of memorising prompts.
+    t0 = time.time(); ema = None
     for step in range(args.steps):
-        i = b.rng.integers(0, len(data) - T - 1)
-        toks = data[i:i+T+1]
-        lr = 0.03 if step < args.steps // 2 else 0.008
-        loss = b.step(toks[:-1], toks[1:], lr)
+        p_ids, k_ids = data[rng.integers(0, len(data))]
+        seq = p_ids + k_ids
+        x = np.array(seq[:-1]); y = np.array(seq[1:])
+        mask = np.zeros(len(y)); mask[len(p_ids) - 1:] = 1.0
+        lr = 0.03 if step < args.steps * 0.6 else (0.012 if step < args.steps * 0.85 else 0.004)
+        loss = b.step(x, y, lr, mask)
+        ema = loss if ema is None else 0.98 * ema + 0.02 * loss
         if step % 1000 == 0:
-            print(f"  step {step:5d}  ce {loss:.3f}  ({time.time()-t0:.1f}s)")
-    print(f"  final ce {loss:.3f}")
+            print(f"  step {step:5d}  ce {ema:.3f}  ({time.time()-t0:.1f}s)")
 
-    print("  sample semantic tails:")
-    for pr in ["[happy] it is sunny [F01] ->", "[sleepy] it is night [F0B] ->",
-               "[excited] found your remote [F08] ->", "[grumpy] battery is low [F04] ->"]:
-        print(f"    {pr:38} => {b.generate(pr, stoi, itos)!r}")
+    # Evaluate: how often does the greedy decision match the policy?
+    hits = {"S": 0, "G": 0, "E": 0, "N": 0}; tot = 0
+    for sit in list(situations())[::7]:
+        want = packet(*policy(*sit, args.pack)).strip()
+        got = b.generate(prompt_of(*sit), stoi, itos, n=9).strip()
+        tot += 1
+        for i, kname in enumerate("SGEN"):
+            if len(got) > 2 * i + 1 and len(want) > 2 * i + 1 and got[2*i+1] == want[2*i+1]:
+                hits[kname] += 1
+    acc = {k: v / tot for k, v in hits.items()}
+    print("  policy agreement (greedy): " + "  ".join(f"{k}={acc[k]:.0%}" for k in "SGEN"))
+    for sit in [(2, ACTS.index("comfort"), FEELS.index("sad"), 0),
+                (2, ACTS.index("comfort"), FEELS.index("sad"), 1),
+                (3, ACTS.index("celebrate"), 2, 0), (0, ACTS.index("joke"), 0, 0),
+                (4, ACTS.index("greet"), 0, 0), (1, ACTS.index("unheard"), 0, 1)]:
+        pr = prompt_of(*sit)
+        print(f"    {pr:36} => {b.generate(pr, stoi, itos, n=9).strip()!r:14} policy {packet(*policy(*sit, args.pack)).strip()}")
 
     size = write_foxb(args.out, b, itos)
     print(f"train_brain: wrote {args.out}  {size} bytes")
+    if min(acc.values()) < 0.6:
+        print("train_brain: WARNING policy agreement is low; firmware will fall back to the table")
 
 
 if __name__ == "__main__":

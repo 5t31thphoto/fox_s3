@@ -32,12 +32,37 @@ static uint8_t hash_fact(const String& fact) {
     return (uint8_t)(0x80u | ((h >> 1) & 0x7Fu));
 }
 
-static const char* const PRE[] = {
-    "", "ooh! ", "hehe, ", "okay~ "
+// ---- FOXESE v2 rendering banks ---------------------------------------------
+// style:   0 plain 1 bubbly 2 tender 3 silly 4 shy 5 dramatic 6 drowsy 7 sassy
+// gesture: 0 still 1 wag 2 perk 3 tilt 4 nuzzle 5 bounce 6 flop 7 squint
+// The brain picks the style (already mood-aware); this is the ONLY place a line
+// gets decorated, so nothing is stacked twice.
+static const char* const STY_PRE[8][5] = {
+    {"", "", "so, ", "okay, ", "well, "},
+    {"ooh! ", "yay, ", "oh oh! ", "hehe, ", ""},
+    {"aww, ", "hey... ", "", "oh, ", "*softly* "},
+    {"hehe ", "heehee, ", "*snorts* ", "pfft, ", ""},
+    {"um... ", "*blushes* ", "oh... ", "*hides behind tail* ", ""},
+    {"behold! ", "oh my! ", "gasp! ", "*dramatic pose* ", "listen! "},
+    {"*yawn* ", "mmn... ", "*sleepy blink* ", "zzz... oh, ", ""},
+    {"*hmf* ", "fine. ", "obviously, ", "*flicks tail* ", "hmph, "},
 };
-static const char* const SUF[] = {
-    ".", "!", " ~", " hehe!"
+static const char* const STY_SUF[8][5] = {
+    {".", "", ".", "", "."},
+    {"!", " ~", "!", " hehe", "!!"},
+    {" ~", ".", "", " *soft*", " mm"},
+    {" hehe", "!", " *wiggle*", "~", "!"},
+    {"...", " *blush*", " hehe...", "~", ""},
+    {"!", "!!", " *ta-da*", "!", ""},
+    {"...", " *yawn*", " zzz", "...", ""},
+    {".", " i guess", " *hmf*", ".", ""},
 };
+static const char* const GESTURE[8] = {
+    "", "*tail wag* ", "*ears perk* ", "*tilts head* ", "*nuzzles* ",
+    "*bounces* ", "*flops down* ", "*squints* "
+};
+static uint32_t rnd5() { return esp_random() % 5; }
+static bool is_punct(char ch) { return ch == '.' || ch == '!' || ch == '?' || ch == '~'; }
 }
 
 uint8_t foxese_fact_id(const String& fact) {
@@ -57,44 +82,46 @@ uint8_t foxese_fact_id(const String& fact) {
 }
 
 String foxese_encode(uint8_t mood, uint8_t fact_id, uint8_t style,
-                     uint8_t gesture, uint8_t intensity) {
-    String s = "F1M"; s += hexc(mood & 0x0F); s += "F";
+                     uint8_t gesture, uint8_t intensity, uint8_t next) {
+    String s = "F2M"; s += hexc(mood & 0x0F); s += "F";
     s += hexc((fact_id >> 4) & 0x0F); s += hexc(fact_id & 0x0F);
     s += "S"; s += hexc(style & 0x0F);
     s += "G"; s += hexc(gesture & 0x0F);
     s += "E"; s += hexc(intensity & 0x0F);
+    s += "N"; s += hexc(next & 0x0F);
     return s;
 }
 
 bool foxese_parse(const String& packet, Foxese& out) {
     out = Foxese{};
     String s = packet; s.trim();
-    // Exactly 13 printable bytes: F1 Mx Fxx Sx Gx Ex.
-    if (s.length() != 13 || s[0] != 'F' || s[1] != '1' ||
+    // v2: exactly 15 printable bytes: F2 Mx Fxx Sx Gx Ex Nx.
+    if (s.length() != 15 || s[0] != 'F' || s[1] != '2' ||
         s[2] != 'M' || s[4] != 'F' || s[7] != 'S' ||
-        s[9] != 'G' || s[11] != 'E') return false;
+        s[9] != 'G' || s[11] != 'E' || s[13] != 'N') return false;
     uint8_t m = nibble_at(s,3), f = 0, st = nibble_at(s,8);
-    uint8_t g = nibble_at(s,10), e = nibble_at(s,12);
-    if (m == 0xFF || st == 0xFF || g == 0xFF || e == 0xFF || m > 4 || st > 3 || g > 3 || e > 3) return false;
+    uint8_t g = nibble_at(s,10), e = nibble_at(s,12), n = nibble_at(s,14);
+    if (m > 4 || st > 7 || g > 7 || e > 3 || n > 4) return false;
     if (!byte_at(s,5,f)) return false;
-    out.version = 1; out.mood=m; out.fact_id=f; out.style=st;
-    out.gesture=g; out.intensity=e; out.valid=true; return true;
+    out.version = 2; out.mood = m; out.fact_id = f; out.style = st;
+    out.gesture = g; out.intensity = e; out.next = n; out.valid = true;
+    return true;
 }
 
 String foxese_expand(const Foxese& x, const String& fact) {
     if (!x.valid || !fact.length()) return "";
-    // The model is not allowed to supply the fact text.  This is always the
-    // firmware-owned source of truth. Every semantic field affects expansion.
-    String body;
-    switch (x.style & 3) {
-        case 1: body = String(PRE[1]) + fact; break;
-        case 2: body = fact + SUF[2]; break;
-        case 3: body = String(PRE[2]) + fact + SUF[3]; break;
-        default: body = fact + SUF[0]; break;
-    }
-    if (x.gesture == 1) body = "*ears perk* " + body;
-    else if (x.gesture == 2) body = "*tail wag* " + body;
-    else if (x.gesture == 3) body = "*tilts head* " + body;
-    if (x.intensity >= 3) body += "!";
-    return body;
+    // The model never supplies the words: `fact` is always firmware-owned.
+    String body = fact; body.trim();
+    String pre = STY_PRE[x.style & 7][rnd5()];
+    String suf = STY_SUF[x.style & 7][rnd5()];
+    bool own_action = body.length() && body[0] == '*';
+    if (own_action && pre.length() && pre[0] == '*') pre = "";      // one *action* up front
+    char last = body.length() ? body[body.length() - 1] : ' ';
+    if (is_punct(last) && suf.length() && is_punct(suf[0])) suf = "";   // no "!." pile-ups
+    String out = (own_action ? String("") : String(GESTURE[x.gesture & 7])) + pre + body + suf;
+    // intensity: 3 = emphatic, 0 = soft
+    out.trim();
+    if (x.intensity >= 3 && out.length() && out[out.length() - 1] == '.') out.setCharAt(out.length() - 1, '!');
+    if (x.intensity == 0 && out.length() && out.endsWith("!!")) out.remove(out.length() - 1);
+    return out;
 }

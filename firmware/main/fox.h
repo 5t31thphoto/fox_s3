@@ -37,6 +37,45 @@ static constexpr uint8_t  MOOD_LEVELS   = 5;
 
 enum FoxMood : uint8_t { MOOD_SLEEPY, MOOD_CALM, MOOD_HAPPY, MOOD_EXCITED, MOOD_GRUMPY };
 
+// ---- BRAIN v2 situation context (order MUST match tools/train_brain.py ACTS /
+//      FEELS and brain_policy.h — CI checks the header against the trainer) ----
+enum FoxAct : uint8_t {
+    ACT_GREET,
+    ACT_FAREWELL,
+    ACT_COMFORT,
+    ACT_CELEBRATE,
+    ACT_CARE,
+    ACT_ANSWER,
+    ACT_JOKE,
+    ACT_STORY,
+    ACT_FACT,
+    ACT_COMPLIMENT,
+    ACT_AFFECTION,
+    ACT_PLAYFUL,
+    ACT_SULK,
+    ACT_THANKS,
+    ACT_APOLOGY,
+    ACT_AGREE,
+    ACT_DECLINE,
+    ACT_CURIOUS,
+    ACT_ASK,
+    ACT_OFFER,
+    ACT_REPORT,
+    ACT_CONFIRM,
+    ACT_UNHEARD,
+    ACT_IDLE,
+    ACT_REACT,
+    ACT_SAY
+};
+enum FoxFeel : uint8_t { FEEL_NONE, FEEL_SAD, FEEL_HAPPY, FEEL_TIRED, FEEL_HUNGRY, FEEL_SCARED, FEEL_COLD, FEEL_LONELY };
+// What the conversation is doing right now. The chat engine "arms" it before
+// the reply line; speak()->fox_dress() consumes it once (one-shot), asks the
+// brain for style/gesture/intensity/NEXT, and stores the chosen next move.
+struct BrainCtx { uint8_t act = ACT_SAY; uint8_t feel = FEEL_NONE; uint8_t turn = 0; bool armed = false; };
+extern BrainCtx g_brain_ctx;
+extern uint8_t  g_brain_next;      // next move chosen for the last ARMED line
+
+
 // The fox's felt needs drift over time and colour its replies. None of this is
 // an LLM — it is cheap accumulated state, the oldest trick in the companion book.
 struct FoxNeeds {

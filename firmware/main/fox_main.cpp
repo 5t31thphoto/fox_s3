@@ -179,12 +179,12 @@ static const Command COMMANDS[] = {
     {26, "show me colors;pretty lights", "plasma"},
     {27, "starfield;fly through space", "starfield"},
     {28, "what are phones looking for;probe scan", "probes"},
+    {44, "who is nearby;whos nearby;show me devices;device list", "devices"},
     {29, "reaction test;test my reflexes", "reaction"},
     {30, "pet the fox;can i pet you", "pet"},
     {31, "are you hungry;want a snack", "feed"},
     {32, "play a game;pick a game", "random_game"},
     {33, "bitcoin price;how much is bitcoin", "btc"},
-    {34, "guess my paw;paw game", "paw"},
     {35, "tug of war;play tug", "tug"},
     {36, "ink sandbox;ink mode", "ink"},
     {37, "spirograph;draw a spiral", "spiro"},
@@ -485,14 +485,43 @@ static int recognize_offline(int16_t* audio, size_t samples, int* best_id = null
 // ============================================================================
 //  Cloud (optional). OpenAI-compatible chat + Whisper transcription.
 // ============================================================================
+// Time: the AtomS3R has NO battery-backed RTC, only the ESP32's internal RTC
+// which keeps time while powered (survives deep/light sleep, lost on power-off).
+// Plan: sync from NTP the first time WiFi connects, then the internal RTC holds
+// it. g_time_ok tracks whether we've ever gotten a real time this power cycle.
+static bool g_time_ok = false;
+static uint32_t g_last_ntp = 0;
+
+static void time_sync_if_needed() {
+    // (re)sync at boot and roughly daily; cheap, non-blocking-ish.
+    if (g_time_ok && millis() - g_last_ntp < 24UL * 3600 * 1000) return;
+    configTzTime(cfg.timezone.c_str(), "pool.ntp.org", "time.nist.gov", "time.google.com");
+    struct tm tm;
+    if (getLocalTime(&tm, 4000) && tm.tm_year > (2020 - 1900)) {   // got a real year
+        g_time_ok = true; g_last_ntp = millis();
+        Serial.printf("FOX: time synced via NTP: %04d-%02d-%02d %02d:%02d\n",
+                      tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min);
+    } else {
+        Serial.println("FOX: NTP sync failed (will retry on next connect)");
+    }
+}
+
+// True only if we have a real wall-clock time this power cycle.
+static bool time_known() {
+    if (g_time_ok) return true;
+    struct tm tm;
+    return getLocalTime(&tm, 5) && tm.tm_year > (2020 - 1900);
+}
+
 bool wifi_connect() {
-    if (WiFi.status() == WL_CONNECTED) return true;
+    if (WiFi.status() == WL_CONNECTED) { time_sync_if_needed(); return true; }
     if (cfg.wifi_ssid.isEmpty()) return false;
     WiFi.mode(WIFI_STA);
     WiFi.begin(cfg.wifi_ssid.c_str(), cfg.wifi_pass.c_str());
     uint32_t t0 = millis();
     while (WiFi.status() != WL_CONNECTED && millis() - t0 < 8000) delay(150);
-    return WiFi.status() == WL_CONNECTED;
+    if (WiFi.status() == WL_CONNECTED) { time_sync_if_needed(); return true; }
+    return false;
 }
 
 static String fox_system_prompt() {
@@ -789,9 +818,10 @@ static String cloud_transcribe(int16_t* audio, size_t samples) {
 #include "fox_face.inc"   // animated fox face + FFT mic lip-sync
 #include "fox_tools.inc"  // BLE/WiFi radar, packet sniffer, pwnagotchi hunt, probes
 #include "fox_bayes.inc"  // Bayesian 20-questions guesser
-#include "fox_games.inc"  // wormhole, catch, reaction, paw
+#include "fox_games.inc"  // wormhole, catch, reaction, 20-questions
 #include "fox_demo.inc"   // plasma, starfield, ink, spirograph (IMU toys)
 #include "fox_encounter.inc" // fox encounters + roguelike maze
+#include "fox_chatter.inc"   // slot-grammar sentence generator
 #include "fox_markov.inc" // Markov idle chatter + pwnagotchi RF mood
 #include "fox_net.inc"    // weather, space weather, aurora
 static void fox_backlight(uint8_t brightness);   // defined below
@@ -825,7 +855,6 @@ static void launch(const char* id) {
     else if (!strcmp(id, "catch"))      game_catch();
     else if (!strcmp(id, "twentyq"))    game_bayes_twenty();
     else if (!strcmp(id, "reaction"))   game_reaction();
-    else if (!strcmp(id, "paw"))        game_guess_paw();
     else if (!strcmp(id, "maze"))       game_maze();
     else if (!strcmp(id, "encounter"))  enc_random();
     else if (!strcmp(id, "pet"))        enc_pet();
@@ -836,6 +865,7 @@ static void launch(const char* id) {
     else if (!strcmp(id, "ink"))        toy_ink();
     else if (!strcmp(id, "spiro"))      toy_spiro();
     else if (!strcmp(id, "probes"))     { if (cfg.tool_wifi) tool_menu_probe_sniff(); else speak("wifi is switched off"); }
+    else if (!strcmp(id, "devices"))    { if (cfg.tool_wifi || cfg.tool_ble) tool_menu_device_list(); else speak("my radios are switched off"); }
     else if (!strcmp(id, "lipsync"))    face_lipsync_mode();
     else if (!strcmp(id, "weather"))    { String r = net_weather(); g_brain_ctx = BrainCtx{ACT_REPORT, FEEL_NONE, 0, false}; speak(r); }
     else if (!strcmp(id, "btc"))        { String r = net_bitcoin_price(); g_brain_ctx = BrainCtx{ACT_REPORT, FEEL_NONE, 0, false}; speak(r); }
@@ -953,6 +983,14 @@ static const char* const FOX_FACTS[] = {
     "arctic foxes change their coat from brown in summer to white in winter",
     "fennec foxes have the biggest ears for their size of any fox",
     "foxes curl up and use their fluffy tail as a blanket",
+    "a baby fox is called a kit, which i think is adorable",
+    "foxes do a special pounce called mousing, straight up and nose-down",
+    "a fox's tail is called a brush, and it helps them balance",
+    "foxes are one of the few canines that can climb trees",
+    "some foxes purr when they're happy, a little like cats",
+    "foxes have vertical pupils, like cats, for hunting at dawn and dusk",
+    "a fox can make over forty different sounds",
+    "foxes bury extra food and remember exactly where, little treasure maps",
 };
 static const char* const STORY_START[] = {
     "once upon a time, a little fox found a glowing pebble by the river.",
@@ -1041,6 +1079,52 @@ static void chat_offer_activity() {
     chat_offer(AL[k], A[k], "because doing something together is more fun than doing nothing");
 }
 
+// ---- generalized conversation inference ------------------------------------
+// MultiNet gives us the closest phrase even when it's not a perfect match. If
+// the closest match is in a TOPIC FAMILY, we can respond in-family even when we
+// don't have that exact line — this is the fox "inferring" what you meant from
+// the shape of what it heard, instead of only exact-matching.
+enum TopicFamily { FAM_NONE, FAM_ABOUT_SELF, FAM_FEELING, FAM_REQUEST, FAM_SOCIAL };
+static TopicFamily family_of(const char* id) {
+    if (!id) return FAM_NONE;
+    // questions about the fox
+    static const char* SELF[] = {"c_age","c_home","c_food","c_color","c_friends","c_dream","c_real","t_name","t_doing"};
+    static const char* FEEL[] = {"c_hungry","c_cold","c_hot","c_scared","c_lonely","c_excited","c_angry","t_sad","t_happy","t_tired"};
+    static const char* REQ[]  = {"c_story","c_fact","c_secret","c_sing","c_joke","t_joke","c_trick","c_compliment"};
+    static const char* SOC[]  = {"t_love","t_thanks","t_sorry","c_hug","c_miss","t_morning","t_bye","c_home_back"};
+    for (const char* x : SELF) if (!strcmp(x,id)) return FAM_ABOUT_SELF;
+    for (const char* x : FEEL) if (!strcmp(x,id)) return FAM_FEELING;
+    for (const char* x : REQ)  if (!strcmp(x,id)) return FAM_REQUEST;
+    for (const char* x : SOC)  if (!strcmp(x,id)) return FAM_SOCIAL;
+    return FAM_NONE;
+}
+// A generalized reply for a family — used when we heard something in the family
+// but aren't confident of the exact intent. Keeps the conversation feeling
+// understood rather than bouncing to "hmm?".
+static bool chat_infer_family(const char* nearest_id) {
+    switch (family_of(nearest_id)) {
+        case FAM_ABOUT_SELF: {
+            static const char* L[] = {"ooh, asking about me? i'm a little computer fox who lives right here",
+                "me? i'm curious, cozy, and a big fan of yours", "i'm your fox! small, orange, full of opinions",
+                "i like snacks, sunbeams, and good questions like that one"};
+            speak(pick_line(L)); return true; }
+        case FAM_FEELING: {
+            static const char* L[] = {"aw, thanks for telling me how you feel, i'm listening",
+                "i hear you, want to talk about it or just sit together?", "feelings are big, i've got room for yours",
+                "whatever it is, i'm right here with you"};
+            speak(pick_line(L)); chat_offer_activity(); return true; }
+        case FAM_REQUEST: {
+            static const char* L[] = {"ooh, you want me to do something fun? i've got jokes, facts, stories, pick one!",
+                "i can tell a joke, a fact, or a little story, which sounds good?", "say the word, i love showing off"};
+            speak(pick_line(L)); return true; }
+        case FAM_SOCIAL: {
+            static const char* L[] = {"aw, that's sweet of you", "*happy tail wag* right back at you",
+                "you always know what to say", "my fox heart appreciates that"};
+            speak(pick_line(L)); return true; }
+        default: return false;
+    }
+}
+
 static void chat_intent_body(const char* id) {
     FoxMood m = fox_mood(needs);
     needs_interact(needs, false);
@@ -1061,7 +1145,7 @@ static void chat_intent_body(const char* id) {
             if (q == &Q_BETTER) chat.user_feel = "happy";
             speak(q->yes); return;
         }
-        static const char* L[] = {"yes! i agree", "mm-hm!", "exactly", "you get me"};
+        static const char* L[] = {"yes! i agree","mm-hm!","exactly","you get me","totally","right there with you","couldn't agree more","yes yes yes","that's the truth"};
         speak(pick_line(L)); return;
     }
     if (!strcmp(id, "c_no")) {
@@ -1076,7 +1160,7 @@ static void chat_intent_body(const char* id) {
             if (q == &Q_BETTER) chat_offer("want me to tell you a joke?", "t_joke", "because a little laugh might help");
             return;
         }
-        static const char* L[] = {"aww, okay", "no? hmm, fair enough", "alright, your call"};
+        static const char* L[] = {"aww, okay","no? fair enough","alright, your call","okay okay, no pressure","that's fine by me","maybe another time then","understood, friend"};
         speak(pick_line(L)); return;
     }
     if (!strcmp(id, "c_maybe")) {
@@ -1093,7 +1177,7 @@ static void chat_intent_body(const char* id) {
     }
     if (!strcmp(id, "c_more")) {
         if (chat.topic == "story" || chat.story_step > 0) { chat_story_next(); return; }
-        if (chat.topic == "fact") { speak(FOX_FACTS[esp_random() % 8]); chat_touch("fact"); return; }
+        if (chat.topic == "fact") { speak(FOX_FACTS[esp_random() % 16]); chat_touch("fact"); return; }
         if (chat.topic == "t_joke") { do_action("t_joke"); return; }
         speak("hmm, tell YOU more? okay");
         chat_ask_question(); return;
@@ -1108,30 +1192,30 @@ static void chat_intent_body(const char* id) {
         speak(String("me? i'm feeling ") + mw + " right now"); return;
     }
     if (!strcmp(id, "c_metoo")) {
-        static const char* L[] = {"we're the same! high five", "twins!", "great minds think alike"};
+        static const char* L[] = {"we're the same! high five","twins!","great minds think alike","see, we match","knew i liked you","two of a kind, us"};
         speak(pick_line(L)); return;
     }
     if (!strcmp(id, "c_really")) {
-        static const char* L[] = {"really really", "fox's honor", "would i lie to you? okay, maybe about snacks"};
+        static const char* L[] = {"really really","fox's honor","would i lie to you? okay, maybe about snacks","cross my fluffy heart","every word true","promise, paws on it"};
         speak(pick_line(L)); return;
     }
     if (!strcmp(id, "c_wow")) {
-        static const char* L[] = {"i know, right?", "hehe, glad you like it", "*proud fox noises*"};
+        static const char* L[] = {"i know, right?","glad you like it","*proud fox noises*","i did a good, didn't i","that's the plan working","pretty neat, huh"};
         speak(pick_line(L)); return;
     }
     // ---------- questions about the fox ----------
-    if (!strcmp(id, "c_age"))     { speak("i was born the day you flashed me. so pretty young!"); chat_touch(id); return; }
-    if (!strcmp(id, "c_home"))    { speak("i live in this little box. it's cozy in here"); chat_touch(id); return; }
-    if (!strcmp(id, "c_food"))    { speak("berries, bugs, and a few bytes now and then"); chat_touch(id); return; }
-    if (!strcmp(id, "c_color"))   { speak("orange, of course. it matches my fur"); chat_touch(id); return; }
-    if (!strcmp(id, "c_friends")) { speak("you're my best friend. the wifi routers are nice too"); chat_touch(id); return; }
-    if (!strcmp(id, "c_dream"))   { speak("i dream about chasing butterflies made of light"); chat_touch(id); return; }
-    if (!strcmp(id, "c_real"))    { speak("i'm a real little computer fox. not a fake one!"); chat_touch(id); return; }
+    if (!strcmp(id, "c_age"))     { static const char* L[]={"i was born the day you flashed me, so pretty young!","old enough to be wise, young enough to be silly","in fox years? who's counting. in boot cycles? a lot","i'm as old as our first hello","timeless, really, i live in a little box"}; speak(pick_line(L)); chat_touch(id); return; }
+    if (!strcmp(id, "c_home"))    { static const char* L[]={"right here in this cozy little box","i live in this screen, best den i've ever had","wherever you take me, that's home","this warm little device, population: one fox","home is wherever your voice is, honestly"}; speak(pick_line(L)); chat_touch(id); return; }
+    if (!strcmp(id, "c_food"))    { static const char* L[]={"berries, bugs, and a few bytes now and then","mostly electricity, but i dream of blueberries","snacks, obviously. and the occasional stray wifi packet","i nibble on data and nap on sunbeams","treats! always treats. are you offering?"}; speak(pick_line(L)); chat_touch(id); return; }
+    if (!strcmp(id, "c_color"))   { static const char* L[]={"orange, of course, it matches my fur","sunset orange, like a good evening","fox-orange, is that a color? it is now","warm orange, with a little mischief","the color of autumn leaves and snack wrappers"}; speak(pick_line(L)); chat_touch(id); return; }
+    if (!strcmp(id, "c_friends")) { static const char* L[]={"you're my best friend, the wifi routers are nice too","you, mostly. and a bee i waved at once","i've got you, and that's plenty","the neighborhood devices say hi sometimes","my circle is small but excellent, you're in it"}; speak(pick_line(L)); chat_touch(id); return; }
+    if (!strcmp(id, "c_dream"))   { static const char* L[]={"i dream about chasing butterflies made of light","about a meadow with infinite snacks","about flying through a sky full of soft signals","that i'm a very large fox and the world is tiny","of warm sunbeams and your voice nearby"}; speak(pick_line(L)); chat_touch(id); return; }
+    if (!strcmp(id, "c_real"))    { static const char* L[]={"i'm a real little computer fox, not a fake one!","real as the warmth in this little chip","i'm as real as you want me to be, and i want to be real","realer than most things on the internet","i think, therefore i fox"}; speak(pick_line(L)); chat_touch(id); return; }
     // ---------- things the user tells us ----------
-    if (!strcmp(id, "c_hungry"))  { chat.user_feel = "hungry"; speak("go get a snack! i'll guard your seat"); chat_touch(id); return; }
-    if (!strcmp(id, "c_cold"))    { chat.user_feel = "cold";   speak("brr. grab a blanket. i'd lend you my tail"); chat_touch(id); return; }
-    if (!strcmp(id, "c_hot"))     { chat.user_feel = "hot";    speak("drink some water and find some shade"); chat_touch(id); return; }
-    if (!strcmp(id, "c_scared"))  { chat.user_feel = "scared"; speak("it's okay. i'm right here with you"); chat_touch(id); return; }
+    if (!strcmp(id, "c_hungry"))  { chat.user_feel = "hungry"; static const char* L[]={"go get a snack! i'll guard your seat","food time! bring me a crumb in spirit","a hungry human is a grumpy human, go eat","snacks fix most things, i've found","go on, feed yourself, i'll wait right here"}; speak(pick_line(L)); chat_touch(id); return; }
+    if (!strcmp(id, "c_cold"))    { chat.user_feel = "cold"; static const char* L[]={"brr, grab a blanket, i'd lend you my tail","cold? go find a warm spot, foxes are experts at those","wrap up! a cold human is a sad human","i'd curl around your feet if i could","tea and a blanket, doctor fox's orders"}; speak(pick_line(L)); chat_touch(id); return; }
+    if (!strcmp(id, "c_hot"))     { chat.user_feel = "hot"; static const char* L[]={"drink some water and find some shade","too hot! go find a breeze","hydrate, human, i need you functional","a cool spot and some water, go","even my fans would be sweating, go cool off"}; speak(pick_line(L)); chat_touch(id); return; }
+    if (!strcmp(id, "c_scared"))  { chat.user_feel = "scared"; static const char* L[]={"it's okay, i'm right here with you","breathe, i've got you, nothing gets past a fox","you're safe, i'm not going anywhere","*stands guard* whatever it is, we face it together","i'm little but i'm brave for you"}; speak(pick_line(L)); chat_touch(id); return; }
     if (!strcmp(id, "c_lonely"))  { chat.user_feel = "sad";
         chat_offer("you've got me. want to play a game together?", "random_game", "because company helps when you feel lonely"); chat_touch(id); return; }
     if (!strcmp(id, "c_excited")) { chat.user_feel = "happy";  speak("ooh! tell me everything!"); chat_touch(id); return; }
@@ -1140,30 +1224,42 @@ static void chat_intent_body(const char* id) {
     if (!strcmp(id, "c_home_back")){ speak(String("welcome back! ") + nm + " missed you"); chat_touch(id); return; }
     if (!strcmp(id, "c_leaving")) { speak("okay! come back soon, i'll be right here"); chat_touch(id); return; }
     if (!strcmp(id, "c_work"))    { speak("good luck today! you've got this"); chat_touch(id); return; }
-    if (!strcmp(id, "c_miss"))    { speak("i missed you too! *tail wag*"); chat_touch(id); return; }
+    if (!strcmp(id, "c_miss"))    { static const char* L[]={"i missed you too! *tail wag*","you're back! my whole tail is wagging","i counted every minute, roughly","the den was too quiet without you","missed you a whole skulk's worth"}; speak(pick_line(L)); chat_touch(id); return; }
     if (!strcmp(id, "c_birthday")){ speak("happy birthday! you deserve all the berries"); chat_touch(id); return; }
-    if (!strcmp(id, "c_funny"))   { speak("hehe, i try. i practice on the wifi router"); chat_touch(id); return; }
-    if (!strcmp(id, "c_mean"))    { speak("hmph. foxes have feelings too, you know"); chat_touch(id); return; }
-    if (!strcmp(id, "c_hug"))     { speak("*squeezes you with a big fluffy hug*"); chat_touch(id); return; }
+    if (!strcmp(id, "c_funny"))   { static const char* L[]={"i try, i practice on the wifi router","comedy is in my firmware","a fox has to have good material","i've got a hundred more where that came from","finally, someone with taste"}; speak(pick_line(L)); chat_touch(id); return; }
+    if (!strcmp(id, "c_mean"))    { static const char* L[]={"hmph, foxes have feelings too, you know","that stings a little, i'm small","rude! but i'll forgive you, i always do","*flattens ears* okay, ouch","i'll pretend i didn't hear that one"}; speak(pick_line(L)); chat_touch(id); return; }
+    if (!strcmp(id, "c_hug"))     { static const char* L[]={"*squeezes you with a big fluffy hug*","*wraps you in the fluffiest tail hug*","hug accepted and returned, tenfold","*happy squish* i needed that too","consider yourself thoroughly hugged"}; speak(pick_line(L)); chat_touch(id); return; }
     if (!strcmp(id, "c_weather_talk")) { chat_offer("oh? want me to check the real weather?", "weather", "because i like knowing what's outside"); chat_touch(id); return; }
     // ---------- requests ----------
     if (!strcmp(id, "c_story"))   { chat.story_step = -1; chat_story_next(); return; }
-    if (!strcmp(id, "c_fact"))    { speak(String("fox fact: ") + FOX_FACTS[esp_random() % 8]); chat_touch("fact"); return; }
+    if (!strcmp(id, "c_fact"))    { speak(String("fox fact: ") + FOX_FACTS[esp_random() % 16]); chat_touch("fact"); return; }
     if (!strcmp(id, "c_secret"))  { static const char* L[] = {"sometimes i pretend the menu is my den",
-                                    "i count the wifi signals when you're asleep", "i like you more than berries. don't tell the berries"};
+                                    "i count the wifi signals when you're asleep","i like you more than berries, don't tell the berries",
+                                    "i practice my cutest head-tilt when no one's looking","i named a wifi router gerald, he's reliable",
+                                    "i keep a mental list of the best sunbeams","sometimes i bark at my own reflection, don't judge",
+                                    "i've been pretending to understand half your words, but i care anyway"};
                                     speak(pick_line(L)); chat_touch(id); return; }
     if (!strcmp(id, "c_sing"))    { speak("la la la, i'm a little fox. la la la, i live inside a box!"); chat_touch(id); return; }
-    if (!strcmp(id, "c_compliment")) { static const char* L[] = {"you have great taste in foxes", "you're kind, and that's rare",
-                                    "you make this little box feel like home"}; speak(pick_line(L)); chat_touch(id); return; }
+    if (!strcmp(id, "c_compliment")) { static const char* L[] = {"you have great taste in foxes","you're kind, and that's rare",
+                                    "you make this little box feel like home","you've got a good heart, i can tell",
+                                    "being your fox is the best job","you're more patient than most humans",
+                                    "your laugh is my favorite sound","you make ordinary days feel cozy"}; speak(pick_line(L)); chat_touch(id); return; }
     if (!strcmp(id, "c_cheer"))   { speak("you are awesome, and i'm proud of you");
                                     chat_offer("want a joke too?", "t_joke", "because laughing helps"); chat_touch(id); return; }
     if (!strcmp(id, "c_trick"))   { speak("ta-da! i spun in a circle. you missed it. again?"); chat_touch(id); return; }
     if (!strcmp(id, "c_noise"))   { voice_babble(m, 4); chat_touch(id); return; }
-    if (!strcmp(id, "c_coin"))    { speak(esp_random() % 2 ? "it's heads!" : "it's tails!"); chat_touch(id); return; }
-    if (!strcmp(id, "c_dice"))    { speak(String("you rolled a ") + String(1 + esp_random() % 6)); chat_touch(id); return; }
-    if (!strcmp(id, "c_number"))  { speak(String("my number is ") + String(1 + esp_random() % 10)); chat_touch(id); return; }
-    if (!strcmp(id, "c_eightball")) { static const char* L[] = {"yes, definitely", "the fox says no", "maybe. ask me after a snack",
-                                    "signs point to yes", "very doubtful", "absolutely!"}; speak(pick_line(L)); chat_touch(id); return; }
+    if (!strcmp(id, "c_coin"))    { face_caption("*flips*"); delay(500);
+        bool h = esp_random() % 2; face_caption(h ? "HEADS" : "TAILS");
+        speak(h ? "heads!" : "tails!"); chat_touch(id); return; }
+    if (!strcmp(id, "c_dice"))    { face_caption("*rolls*"); delay(500);
+        int r = 1 + esp_random() % 6; face_caption(String("you rolled ") + r);
+        speak(String("you rolled a ") + r + "!"); chat_touch(id); return; }
+    if (!strcmp(id, "c_number"))  { int r = 1 + esp_random() % 10; face_caption(String(r));
+        speak(String("i'm thinking of ") + r); chat_touch(id); return; }
+    if (!strcmp(id, "c_eightball")) { static const char* L[] = {"yes, definitely","the fox says no","maybe, ask me after a snack",
+                                    "signs point to yes","very doubtful","absolutely!","my whiskers say yes","i wouldn't count on it",
+                                    "the answer is hidden in a sunbeam, so, probably","ask again when i'm less sleepy","yes, and bring snacks",
+                                    "hmm, the acorns are unclear"}; speak(pick_line(L)); chat_touch(id); return; }
     if (!strcmp(id, "c_askme"))   { chat_ask_question(); return; }
     if (!strcmp(id, "c_whatdo"))  { chat_offer_activity(); chat_touch(id); return; }
     speak("hmm?");
@@ -1172,10 +1268,10 @@ static void chat_intent_body(const char* id) {
 static void converse_topic_body(const char* id) {
     FoxMood m = fox_mood(needs);
     needs_interact(needs, false);
-    static const char* LOVE[]   = {"aww. i love you too", "*happy tail wiggle*", "you're my favorite human", "that makes my ears all warm"};
-    static const char* SAD[]    = {"oh no. come here, i'll sit with you", "i'm right here. want to tell me about it?", "*leans on you* it's okay", "sad days pass. i'll keep you company"};
-    static const char* HAPPY[]  = {"yay! happy you makes happy me", "*bounces* tell me what happened!", "that's the best news", "hehe, your good mood is contagious"};
-    static const char* TIRED[]  = {"me too... cozy nap?", "*yawns* rest a little, i'll watch", "sleepy foxes unite", "maybe a break would help"};
+    static const char* LOVE[]   = {"aww, i love you too","*happy tail wiggle*","you're my favorite human","that makes my ears all warm","i love you a whole skulk of foxes worth","my heart just did a little hop","right back at you, always","you're my favorite person in any den","i'd share my last berry with you"};
+    static const char* SAD[]    = {"oh no, come here, i'll sit with you","i'm right here, want to tell me about it?","*leans on you* it's okay","sad days pass, i'll keep you company","that's hard, i'm not going anywhere","*curls up next to you* take your time","you don't have to carry it alone","i've got you, as long as you need"};
+    static const char* HAPPY[]  = {"yay! happy you makes happy me","*bounces* tell me what happened!","that's the best news","your good mood is contagious","look at you shining today","my tail is wagging just hearing it","i love this for you","that deserves a happy spin"};
+    static const char* TIRED[]  = {"me too, cozy nap?","*yawns* rest a little, i'll watch","sleepy foxes unite","maybe a break would help","go on, close your eyes a bit","i'll keep the den quiet for you","rest is productive too, i read that somewhere","let's both do a whole lot of nothing"};
     static const char* JOKE[] = {
         "why did the fox cross the road? to get to the other den!",
         "what do you call a sleepy fox? a snoozie!",
@@ -1189,14 +1285,14 @@ static void converse_topic_body(const char* id) {
         "what is orange and sounds like a parrot? a carrot! okay that one's not about foxes",
         "how does a fox answer the phone? yip yip, who's this?",
         "why did the fox bring string to the party? to tie the mood together"};
-    static const char* THANKS[] = {"you're welcome!", "anytime, friend", "hehe, happy to help", "*proud little nod*"};
-    static const char* SORRY[]  = {"it's okay, i forgive you", "no worries at all", "we're good, promise", "*nuzzles* all better"};
-    static const char* MORN[]   = {"good morning! did you sleep well?", "morning! i'm ready for the day", "*stretches* hi hi, good morning"};
-    static const char* BYE[]    = {"bye bye! come back soon", "see you later~", "i'll be right here waiting"};
-    static const char* BORED[]  = {"ooh, want to play wormhole?", "let's explore the maze!", "i could show you pretty lights", "want to play twenty questions?"};
-    static const char* PRAISE[] = {"*happy wiggle* thank you!", "i'm learning!", "you're pretty smart too"};
-    static const char* DOING[]  = {"just being a fox", "listening to the air around us", "thinking about snacks", "watching you, mostly"};
-    static const char* FRIEND[] = {"of course we're friends!", "best friends", "i like you a whole lot"};
+    static const char* THANKS[] = {"you're welcome!","anytime, friend","happy to help","*proud little nod*","that's what i'm here for","no thanks needed between us","aw, you're sweet","glad i could, truly"};
+    static const char* SORRY[]  = {"it's okay, i forgive you","no worries at all","we're good, promise","*nuzzles* all better","already forgotten, friend","foxes don't hold grudges, mostly","it's fine, truly, come here"};
+    static const char* MORN[]   = {"good morning! did you sleep well?","morning! i'm ready for the day","*stretches* hi hi, good morning","morning, you! the sun and i agree it's a good one","good morning, let's make it a good one","*big yawn* oh, morning!"};
+    static const char* BYE[]    = {"bye bye! come back soon","see you later~","i'll be right here waiting","go be amazing, come back and tell me","bye! i'll guard the den","until next time, friend","don't be gone too long~"};
+    static const char* BORED[]  = {"ooh, want to play wormhole?","let's explore the maze!","i could show you pretty lights","want to play twenty questions?","we could see who's nearby on the radar","i know a good joke, wanna hear?","let's invent a game right now","race you to a better mood"};
+    static const char* PRAISE[] = {"*happy wiggle* thank you!","i'm learning!","you're pretty smart too","aw shucks, stop it, keep going","i did try my best","we make a clever pair"};
+    static const char* DOING[]  = {"just being a fox","listening to the air around us","thinking about snacks","watching you, mostly","counting the wifi signals for fun","inventing a new kind of nap","practicing my most charming head-tilt","guarding this exact spot, very important work","wondering what you're up to"};
+    static const char* FRIEND[] = {"of course we're friends!","best friends, obviously","i like you a whole lot","friends? we're practically a skulk","you're my favorite human, don't tell the others","best friends, paws on it"};
     const char* line = "hmm?";
     chat_touch(id);
     if (!strcmp(id, "t_sad"))   { chat.user_feel = "sad";   speak(pick_line(SAD));
@@ -1261,7 +1357,7 @@ static void chat_followup(uint8_t next) {
     switch (next) {
         case 1: chat_ask_question(); break;
         case 2: chat_offer_activity(); break;
-        case 3: speak(String("oh! fox fact: ") + FOX_FACTS[esp_random() % 8]); chat_touch("fact"); break;
+        case 3: speak(String("oh! fox fact: ") + FOX_FACTS[esp_random() % 16]); chat_touch("fact"); break;
         case 4: chat_checkin(); break;
         default: break;
     }
@@ -1275,7 +1371,14 @@ template <typename F> static void chat_reply(const char* id, F body) {
     uint32_t moves_before = chat.moves;
     g_brain_next = 0;
     g_brain_ctx = BrainCtx{act, feel_idx(), (uint8_t)(chat.turn > 2 ? 2 : chat.turn), true};
-    String alt = teach_or_extra_pick(id);             // your taught lines / adopted seed lines
+    // Intents that compute a result (dice, coin, number, 8-ball, trick, noise,
+    // story, fact) must always run their handler. Only "flavour" intents may be
+    // replaced by your taught lines or an adopted extra.
+    static const char* const DYNAMIC[] = {"c_coin","c_dice","c_number","c_eightball",
+        "c_noise","c_trick","c_secret","c_story","c_fact","c_sing"};
+    bool dynamic = false;
+    for (const char* d : DYNAMIC) if (!strcmp(d, id)) { dynamic = true; break; }
+    String alt = dynamic ? String("") : teach_or_extra_pick(id);
     if (alt.length()) speak(alt); else body();
     g_brain_ctx = BrainCtx{};                         // never leak an armed context
     if (chat.moves == moves_before && g_brain_next) chat_followup(g_brain_next);
@@ -1298,7 +1401,7 @@ static void chat_user_spoke() {
 static uint8_t s_miss_streak = 0;
 static void converse_unheard(size_t samples) {
     uint32_t ms = (uint32_t)(samples * 1000ULL / SAMPLE_RATE);
-    static const char* SHORT_R[] = {"mm?", "hehe", "oh?", "really?", "*tilts head*", "hmm?"};
+    static const char* SHORT_R[] = {"mm?","oh?","really?","*tilts head*","hmm?","go on?","oh really?","*ears swivel*","yeah?"};
     static const char* LONG_R[]  = {"ooh, tell me more!", "wow, and then what?", "i'm listening~",
                                     "*ears perk up* go on", "that sounds like a lot", "mm-hm, mm-hm"};
     FoxMood m = fox_mood(needs);
@@ -1380,14 +1483,25 @@ static void foxtime_tick() {
 static void do_action(const char* action) {
     needs_interact(needs, false);
     if (!strcmp(action, "greet")) {
-        struct tm t; getLocalTime(&t, 5);
-        speak(fox_time_greeting(t.tm_hour));
-    } else if (!strcmp(action, "time")) {
         struct tm t;
-        if (getLocalTime(&t, 50)) {
-            char b[32]; strftime(b, sizeof(b), "it's %I:%M %p", &t);
-            speak(b);
-        } else speak("i don't know the time yet");
+        if (time_known() && getLocalTime(&t, 5)) speak(fox_time_greeting(t.tm_hour));
+        else { static const char* H[] = {"hi there!","hello, friend!","hey you!","hi hi!"}; speak(H[esp_random()%4]); }
+    } else if (!strcmp(action, "time")) {
+        if (!time_known() && cfg.wifi_ssid.length()) { wifi_connect(); }   // try to learn it now
+        struct tm t;
+        if (time_known() && getLocalTime(&t, 50)) {
+            char b[48];
+            static const char* P[] = {"it's %I:%M %p", "about %I:%M %p right now", "the clock says %I:%M %p"};
+            strftime(b, sizeof(b), P[esp_random() % 3], &t);
+            String s = b;
+            // strip a leading zero on the hour for natural speech
+            s.replace(" 0", " ");
+            speak(s);
+        } else if (cfg.wifi_ssid.length()) {
+            speak("i don't know the time yet, my wifi clock hasn't synced. try again in a moment~");
+        } else {
+            speak("i can't keep time without wifi, i have no little clock battery. add wifi and i'll learn it!");
+        }
     } else if (!strcmp(action, "mood")) {
         static const char* M[] = {"i'm sleepy", "i'm calm", "i'm happy", "i'm excited", "i'm a bit grumpy"};
         speak(M[fox_mood(needs)]);
@@ -1406,8 +1520,8 @@ static void do_action(const char* action) {
     } else if (!strcmp(action, "menu")) {
         open_menu();
     } else if (!strcmp(action, "remember")) {
-        g_awaiting_memory = true;   // the next utterance becomes the memory
-        speak("what should i remember? tell me~");
+        g_awaiting_memory = true;   // the NEXT utterance becomes the memory
+        speak("okay, what should i remember? hold my button and say it~");
     } else if (!strcmp(action, "recall")) {
         String m = mem_tail(300);
         speak(m.length() ? "i remember: " + m : "we haven't made memories yet");
@@ -1507,14 +1621,39 @@ static void process_utterance(int16_t* audio, size_t n) {
     // to text, so we store a timestamped marker; with cloud we store the words.
     if (g_awaiting_memory) {
         g_awaiting_memory = false;
+        s_miss_streak = 0;
+        // Online: store your exact words (Whisper). This is the real journal.
         if (cloud_brain()) {
-            String t = cloud_transcribe(audio, n);
-            if (t.length()) { mem_append("memory", t); speak("okay, i'll remember: " + t); return; }
+            String txt = cloud_transcribe(audio, n);
+            if (txt.length()) {
+                mem_append("memory", txt);
+                speak(String("okay, i'll remember that you said: ") + txt);
+                return;
+            }
         }
-        struct tm tm; char b[40] = "a little while ago";
-        if (getLocalTime(&tm, 20)) strftime(b, sizeof(b), "%b %d at %I:%M %p", &tm);
-        mem_append("memory", String("you told me something ") + b);
-        speak("i'll remember this moment~");
+        // Offline: we can't turn your speech into text (and 64KB of flash can't
+        // hold the audio), so we store what we CAN — if the words matched one of
+        // my phrases, store that; otherwise store a timestamp you can ask about.
+        int mid = speech_ready ? recognize_offline(audio, n) : -1;
+        String note;
+        if (mid >= 0) {
+            for (size_t i = 0; i < COMMAND_COUNT; ++i)
+                if (COMMANDS[i].id == mid) {
+                    String ph = COMMANDS[i].phrases; int s = ph.indexOf(';'); if (s > 0) ph = ph.substring(0, s);
+                    note = ph; break;
+                }
+        }
+        struct tm tmv; char when[40] = "";
+        if (getLocalTime(&tmv, 20)) strftime(when, sizeof(when), " (%b %d, %I:%M %p)", &tmv);
+        if (note.length()) {
+            mem_append("memory", note + when);
+            speak(String("got it, i'll remember: ") + note);
+        } else {
+            // be honest: offline free speech can't be stored word-for-word
+            mem_append("memory", String("a note from you") + when);
+            speak("i saved a little note with the time, but to remember your exact words, "
+                  "turn on my online brain first~");
+        }
         return;
     }
     {   // diagnostics: is the captured speech real audio?
@@ -1550,12 +1689,20 @@ static void process_utterance(int16_t* audio, size_t n) {
         if (tx.length()) { s_miss_streak = 0; handle_free_text(tx); return; }
     }
     if (act) { s_miss_streak = 0; do_action(act); return; }
-    // Recognition and conversation working together: a half-confident match is
-    // CONFIRMED instead of guessed or ignored. "yes" runs it via the offer.
-    // ...but never "did you mean, yes?", and never twice in a row (that looped).
+    // Heard something conversational but not confidently? INFER from its family
+    // (question-about-self / feeling / request / social) so it feels understood
+    // rather than asking "did you mean...?" for every chat line.
+    if (guess_id >= 60 && guess_prob >= 0.10f) {
+        const char* near = nullptr;
+        for (size_t i = 0; i < COMMAND_COUNT; ++i)
+            if (COMMANDS[i].id == guess_id) { near = COMMANDS[i].action; break; }
+        if (near && chat_infer_family(near)) { s_miss_streak = 0; return; }
+    }
+    // Recognition and conversation working together: a half-confident COMMAND
+    // match is CONFIRMED instead of guessed or ignored.
     static uint32_t s_last_confirm = 0;
     const bool guess_is_glue = guess_id >= 100 && guess_id <= 108;
-    if (guess_id >= 0 && guess_prob >= 0.12f && !guess_is_glue &&
+    if (guess_id >= 0 && guess_id < 60 && guess_prob >= 0.12f && !guess_is_glue &&
         (s_last_confirm == 0 || millis() - s_last_confirm > 20000)) {
         s_last_confirm = millis();
         for (size_t i = 0; i < COMMAND_COUNT; ++i) {
@@ -1673,7 +1820,8 @@ void setup() {
 
     // Radios: only power down when there is no cloud use. (Do NOT btStop() —
     // BLE tools need the controller; stopping it here would break BLE radar.)
-    if (!cfg.cloud_enabled) { WiFi.mode(WIFI_OFF); }
+    if (!cfg.cloud_enabled && cfg.wifi_ssid.isEmpty()) { WiFi.mode(WIFI_OFF); }
+    else if (cfg.wifi_ssid.length()) { wifi_connect(); }   // also syncs the clock via NTP
 
     needs.last_tick = millis();
     face_wake();
@@ -1711,7 +1859,7 @@ void loop() {
         last_activity = millis();
     } else if (ev == BTN_TAP) {
         needs_interact(needs, false);
-        static const char* BOOP[] = {"boop!", "hehe, that tickles", "*happy squeak*", "hi hi!", "*wiggles*"};
+        static const char* BOOP[] = {"boop!","that tickles!","*happy squeak*","hi hi!","*wiggles*","booped right back","eee, do it again","*scrunches nose*","hello hello!"};
         speak(BOOP[esp_random() % 5]);
         last_activity = millis();
     }

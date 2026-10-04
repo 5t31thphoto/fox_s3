@@ -88,19 +88,13 @@ static String successor(const Corpus& c, const String& word, bool start) {
 
 // Generate a fresh idle line for the mood via the Markov walk. Falls back to
 // the fixed fox_idle_line() if the walk produces nothing.
+String fox_generate_line(FoxMood mood, bool strong);   // fox_chatter.inc
+
+// Idle chatter now comes from the slot-grammar generator (fox_chatter.inc),
+// which produces ~2000+ distinct, grammatical lines instead of the old
+// order-1 Markov walk that could loop ("go go go go").
 String fox_markov_line(FoxMood mood) {
-    using namespace markov;
-    Corpus c = corpus_for(mood);
-    String first = successor(c, "", true);
-    if (!first.length()) return fox_idle_line(mood);
-    String out = first, cur = first;
-    for (int i = 0; i < 7; ++i) {
-        String nxt = successor(c, cur, false);
-        if (!nxt.length()) break;
-        out += " " + nxt;
-        cur = nxt;
-    }
-    return out;
+    return fox_generate_line(mood, mood == MOOD_EXCITED);
 }
 
 // ---------------------------------------------------------------------------

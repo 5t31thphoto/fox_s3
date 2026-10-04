@@ -1,7 +1,7 @@
-// fox_games.inc — digital fidget games. Included by fox_main.cpp.
+// fox_games.inc - digital fidget games. Included by fox_main.cpp.
 //
 // A mix of IMU tilt games (fly through wormholes, catch falling treats) and
-// word games (20 questions, guess-my-paw). Each runs as a self-contained loop
+// word games (20 questions). Each runs as a self-contained loop
 // on the 128x128 LCD and returns when the button is clicked or the game ends.
 // Voice can launch any of these; the fox narrates the result.
 #pragma once
@@ -31,25 +31,25 @@ void tilt_xy(float* rx, float* ry) {
 }
 
 // ===========================================================================
-//  WORMHOLE — fly your ship through shrinking rings by tilting the device.
+//  WORMHOLE - fly your ship through shrinking rings by tilting the device.
 // ===========================================================================
 void game_wormhole() {
     uint32_t t_start = millis();
     speak("hold tight, into the wormhole!");
-    face_caption("tilt to steer — click to exit");
-    float ship_x = 64, ship_y = 100;
-    int score = 0, lives = 3;
-    // tunnel rings: z grows toward camera
-    struct Ring { float z; float cx, cy; };
-    const int NR = 8;
+    face_caption("tilt to steer - click to exit");
+    float ship_x = 64, ship_y = 80;
+    int score = 0, lives = 5, best_streak = 0, streak = 0;
+    // tunnel rings on a conveyor: evenly spaced in depth so one is always near
+    struct Ring { float z, cx, cy; bool judged; };
+    const int NR = 5;
+    const float ZSTEP = 55.f, ZFAR = 10.f + NR * 55.f;
     Ring rings[NR];
-    for (int i = 0; i < NR; ++i) {
-        rings[i].z = 20.f + i * 18.f;
-        rings[i].cx = 64 + (int)(esp_random() % 21) - 10;
-        rings[i].cy = 64 + (int)(esp_random() % 21) - 10;
-    }
+    for (int i = 0; i < NR; ++i)
+        rings[i] = { 40.f + i * ZSTEP, 64.f + (int)(esp_random()%61) - 30,
+                     64.f + (int)(esp_random()%61) - 30, false };
+    float speed = 36.f;
     uint32_t last = millis();
-    while (lives > 0 && millis() - t_start < 90000) {
+    while (lives > 0 && millis() - t_start < 120000) {
         M5.update();
         if (game_btn_exit(t_start)) break;
         float rx, ry; tilt_xy(&rx, &ry);
@@ -67,27 +67,37 @@ void game_wormhole() {
             int sy = (i * 53 + (int)(millis() / 12)) % 128;
             face_canvas->drawPixel(sx, sy, 0x8410);
         }
-        // rings from far to near
+        speed += 1.2f * dt;                      // gently accelerates
+        bool flash_hit = false, flash_miss = false;
         for (int i = 0; i < NR; ++i) {
-            rings[i].z -= 28.f * dt;
-            if (rings[i].z < 4.f) {
-                // missed / scored
-                float dx = ship_x - rings[i].cx;
-                float dy = ship_y - rings[i].cy;
-                if (dx*dx + dy*dy < 22*22) score += 1;
-                else { lives -= 1; }
-                rings[i].z = 20.f + (NR - 1) * 18.f;
-                rings[i].cx = 64 + (int)(esp_random() % 31) - 15;
-                rings[i].cy = 58 + (int)(esp_random() % 25) - 12;
+            rings[i].z -= speed * dt;
+            // JUDGE as the ring reaches the ship plane (z~18), with a fat radius
+            if (!rings[i].judged && rings[i].z < 18.f) {
+                rings[i].judged = true;
+                float dx = ship_x - rings[i].cx, dy = ship_y - rings[i].cy;
+                if (dx*dx + dy*dy < 30*30) {         // generous: pass through the ring
+                    score++; streak++; if (streak > best_streak) best_streak = streak;
+                    flash_hit = true; needs_interact(needs, true);
+                } else { lives--; streak = 0; flash_miss = true; }
             }
-            float sc = 80.f / rings[i].z;
-            int r = (int)(sc * 10);
-            if (r < 3) r = 3;
-            if (r > 60) r = 60;
-            uint16_t col = rings[i].z < 12 ? 0xF800 : (rings[i].z < 30 ? 0xFFE0 : 0x07FF);
-            face_canvas->drawCircle((int)rings[i].cx, (int)rings[i].cy, r, col);
-            face_canvas->drawCircle((int)rings[i].cx, (int)rings[i].cy, r - 1, col);
+            if (rings[i].z < 3.f) {                   // recycle to the far end, evenly spaced
+                float maxz = 0; for (int j = 0; j < NR; ++j) if (rings[j].z > maxz) maxz = rings[j].z;
+                rings[i].z = maxz + ZSTEP;
+                rings[i].cx = 64 + (int)(esp_random()%61) - 30;
+                rings[i].cy = 64 + (int)(esp_random()%61) - 30;
+                rings[i].judged = false;
+            }
+            float sc = 90.f / rings[i].z;
+            int r = (int)(sc * 11); if (r < 3) r = 3; if (r > 64) r = 64;
+            int rcx = 64 + (int)((rings[i].cx - 64) * sc * 0.6f);   // converge to center (tunnel)
+            int rcy = 64 + (int)((rings[i].cy - 64) * sc * 0.6f);
+            uint16_t col = rings[i].z < 24 ? 0x07E0 : (rings[i].z < 60 ? 0xFFE0 : 0x07FF);
+            face_canvas->drawCircle(rcx, rcy, r, col);
+            face_canvas->drawCircle(rcx, rcy, r - 1, col);
+            face_canvas->drawCircle(rcx, rcy, r - 2, col);
         }
+        if (flash_hit)  { face_canvas->drawString("+1", (int)ship_x - 6, (int)ship_y - 20); }
+        if (flash_miss) { for (int b=0;b<128;b+=8) face_canvas->drawPixel(b,0,0xF800); }
         // ship
         face_canvas->fillTriangle((int)ship_x, (int)ship_y - 6,
                                   (int)ship_x - 6, (int)ship_y + 6,
@@ -95,12 +105,13 @@ void game_wormhole() {
         face_canvas->setTextDatum(top_left);
         face_canvas->setTextColor(0xFFFF);
         face_canvas->setTextSize(1);
-        face_canvas->drawString(String("sc ") + score + "  hp " + lives, 2, 2);
+        face_canvas->drawString(String("rings ") + score + "  hp " + lives + "  x" + streak, 2, 2);
         face_canvas->pushSprite(0, 0);
         delay(16);  // ~60fps eye candy without tearing as bad as unbounded
     }
-    face_caption(String("wormhole score ") + score);
-    speak(String("score ") + score + "!");
+    face_caption(String("rings cleared: ") + score);
+    speak(score >= 15 ? (String("whoa, ") + score + " rings! best streak " + best_streak + "!")
+                      : (String("we cleared ") + score + " rings! again?"));
 }
 
 
@@ -122,10 +133,16 @@ void game_catch() {
             drops[i].y += drops[i].v;
             face_canvas->fillCircle((int)drops[i].x, (int)drops[i].y, 4, cfg.color_primary);
             if (drops[i].y > 112) {
-                if (fabsf(drops[i].x - basket) < 14) score++; else misses++;
+                bool caught = fabsf(drops[i].x - basket) < 16;
+                if (caught) { score++; needs_interact(needs, true); }
+                else misses++;
+                // a little splash where it landed
+                face_canvas->fillCircle((int)drops[i].x, 114, caught ? 6 : 2,
+                                        caught ? cfg.color_accent : 0xF800);
                 drops[i].x = random(10, 118); drops[i].y = -random(0, 60);
                 drops[i].v = (float)random(2, 5);
             }
+            else face_canvas->fillCircle((int)drops[i].x, (int)drops[i].y + 2, 2, 0xFD20);  // trail
         }
         // basket
         face_canvas->fillRoundRect((int)basket - 14, 116, 28, 8, 3, cfg.color_accent);
@@ -141,12 +158,12 @@ void game_catch() {
 }
 
 // ===========================================================================
-//  (20 QUESTIONS lives in fox_bayes.inc — a Bayesian guesser that beats a fixed
+//  (20 QUESTIONS lives in fox_bayes.inc - a Bayesian guesser that beats a fixed
 //   tree: it updates beliefs and asks the most informative question each turn.)
 // ===========================================================================
 
 // ===========================================================================
-//  REACTION — wait for the flash, then tap. Measures your reflex.
+//  REACTION - wait for the flash, then tap. Measures your reflex.
 // ===========================================================================
 void game_reaction() {
     speak("wait for green, then tap fast!");
@@ -161,10 +178,3 @@ void game_reaction() {
     speak("too slow~ try again sometime");
 }
 
-// guess-my-paw (kept from before, quick fidget)
-void game_guess_paw() {
-    int paw = esp_random() & 1;
-    speak(paw ? "left or right paw? tap for right~" : "left or right paw? tap for left~");
-    bool tapped = input_wait_yes(2200);
-    speak(tapped ? "hehe you got me!" : "missed! again sometime~");
-}

@@ -37,30 +37,34 @@ static uint8_t hash_fact(const String& fact) {
 // gesture: 0 still 1 wag 2 perk 3 tilt 4 nuzzle 5 bounce 6 flop 7 squint
 // The brain picks the style (already mood-aware); this is the ONLY place a line
 // gets decorated, so nothing is stacked twice.
-static const char* const STY_PRE[8][5] = {
-    {"", "", "so, ", "okay, ", "well, "},
-    {"ooh! ", "yay, ", "oh oh! ", "hehe, ", ""},
-    {"aww, ", "hey... ", "", "oh, ", "*softly* "},
-    {"hehe ", "heehee, ", "*snorts* ", "pfft, ", ""},
-    {"um... ", "*blushes* ", "oh... ", "*hides behind tail* ", ""},
-    {"behold! ", "oh my! ", "gasp! ", "*dramatic pose* ", "listen! "},
-    {"*yawn* ", "mmn... ", "*sleepy blink* ", "zzz... oh, ", ""},
-    {"*hmf* ", "fine. ", "obviously, ", "*flicks tail* ", "hmph, "},
+// Decoration banks, 12 options per style so the same style doesn't repeat the
+// same prefix/suffix. Many entries are empty: most lines should stand alone,
+// decoration is the spice, not the meal.
+static const char* const STY_PRE[8][12] = {
+  /*plain  */ {"","","","","so, ","well, ","okay, ","right, ","hmm, ","","",""},
+  /*bubbly */ {"ooh! ","yay, ","oh! ","hehe, ","eee! ","","oh oh! ","yes! ","","*perks up* ","","wheee, "},
+  /*tender */ {"aww, ","hey... ","oh, ","*softly* ","","sweet thing, ","","*gentle* ","oh honey, ","","*warm* ",""},
+  /*silly  */ {"hehe ","pfft, ","*snorts* ","okay okay, ","","heehee, ","get this, ","","so, uh, ","*grins* ","","boop, "},
+  /*shy    */ {"um... ","*blushes* ","oh... ","","maybe... ","*small voice* ","","i think... ","","uh, ","*peeks out* ",""},
+  /*drama  */ {"behold! ","oh my! ","gasp! ","listen! ","","alas, ","lo, ","*dramatic pose* ","","hark! ","","you won't believe it, "},
+  /*drowsy */ {"*yawn* ","mmn... ","","*sleepy blink* ","zzz... oh, ","","mmh, ","*stretches* ","","soft thought: ","",""},
+  /*sassy  */ {"*hmf* ","fine. ","obviously, ","","look, ","*flicks tail* ","","hmph, ","honestly, ","","i mean, ","sure, "},
 };
-static const char* const STY_SUF[8][5] = {
-    {".", "", ".", "", "."},
-    {"!", " ~", "!", " hehe", "!!"},
-    {" ~", ".", "", " *soft*", " mm"},
-    {" hehe", "!", " *wiggle*", "~", "!"},
-    {"...", " *blush*", " hehe...", "~", ""},
-    {"!", "!!", " *ta-da*", "!", ""},
-    {"...", " *yawn*", " zzz", "...", ""},
-    {".", " i guess", " *hmf*", ".", ""},
+static const char* const STY_SUF[8][12] = {
+  /*plain  */ {"",".","","",".","","","","",".","",""},
+  /*bubbly */ {"!"," ~","!!"," hehe","","!"," yay"," *wiggle*","","!","",""},
+  /*tender */ {" ~","."," *soft*"," mm","",""," okay?"," *warm*","","","",""},
+  /*silly  */ {" hehe","!"," *wiggle*","~","","!"," heh"," *grins*","","","",""},
+  /*shy    */ {"..."," *blush*","~",""," i think","","..."," maybe","","","",""},
+  /*drama  */ {"!","!!"," *ta-da*",""," behold","","!"," *bows*","","","",""},
+  /*drowsy */ {"..."," *yawn*"," zzz","","...","","..."," mm","","","",""},
+  /*sassy  */ {"."," i guess"," *hmf*",""," obviously","","."," whatever","","","",""},
 };
 static const char* const GESTURE[8] = {
     "", "*tail wag* ", "*ears perk* ", "*tilts head* ", "*nuzzles* ",
     "*bounces* ", "*flops down* ", "*squints* "
 };
+static uint32_t rnd12() { return esp_random() % 12; }
 static uint32_t rnd5() { return esp_random() % 5; }
 static bool is_punct(char ch) { return ch == '.' || ch == '!' || ch == '?' || ch == '~'; }
 }
@@ -112,13 +116,18 @@ String foxese_expand(const Foxese& x, const String& fact) {
     if (!x.valid || !fact.length()) return "";
     // The model never supplies the words: `fact` is always firmware-owned.
     String body = fact; body.trim();
-    String pre = STY_PRE[x.style & 7][rnd5()];
-    String suf = STY_SUF[x.style & 7][rnd5()];
+    // Decorate SPARINGLY: a prefix ~45% of the time, a suffix ~40%, a gesture
+    // ~30%. Most lines stand on their own, which kills the "hehe on everything"
+    // feel. Intensity nudges the odds up.
+    int pboost = x.intensity * 8;
+    String pre = (esp_random() % 100 < 45 + pboost) ? STY_PRE[x.style & 7][rnd12()] : String("");
+    String suf = (esp_random() % 100 < 40 + pboost) ? STY_SUF[x.style & 7][rnd12()] : String("");
     bool own_action = body.length() && body[0] == '*';
     if (own_action && pre.length() && pre[0] == '*') pre = "";      // one *action* up front
     char last = body.length() ? body[body.length() - 1] : ' ';
     if (is_punct(last) && suf.length() && is_punct(suf[0])) suf = "";   // no "!." pile-ups
-    String out = (own_action ? String("") : String(GESTURE[x.gesture & 7])) + pre + body + suf;
+    bool show_gest = !own_action && x.gesture && (esp_random() % 100 < 30 + x.intensity * 10);
+    String out = (show_gest ? String(GESTURE[x.gesture & 7]) : String("")) + pre + body + suf;
     // intensity: 3 = emphatic, 0 = soft
     out.trim();
     if (x.intensity >= 3 && out.length() && out[out.length() - 1] == '.') out.setCharAt(out.length() - 1, '!');

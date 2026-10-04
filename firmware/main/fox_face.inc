@@ -1,4 +1,4 @@
-// fox_face.inc — the fox's face: an animated, expressive little vulpine mug
+// fox_face.inc - the fox's face: an animated, expressive little vulpine mug
 // on the AtomS3R's 128x128 display, with mouth movement driven by audio level
 // (FFT lip-sync ported from m5stack-avatar-mic) and captions for clarity.
 #pragma once
@@ -21,7 +21,7 @@ void face_begin(FoxConfig& c) {
     // M5Canvas(parent) defaults to a PSRAM buffer when PSRAM exists. Pushing a
     // PSRAM canvas to the panel corrupts frames on the ESP32-S3 (the face,
     // menu, games and tools all share this one canvas). Keep it in internal
-    // DMA RAM — exactly where it lived before PSRAM was enabled.
+    // DMA RAM - exactly where it lived before PSRAM was enabled.
     face_canvas->setPsram(false);
     if (!face_canvas->createSprite(128, 128)) {
         Serial.println("FOX: canvas: no internal DMA RAM, falling back to PSRAM");
@@ -97,7 +97,7 @@ void face_draw(FoxMood mood) {
     face_canvas->fillTriangle(36, 34, 45, 16, 52, 34, bg);
     face_canvas->fillTriangle(92, 34, 83, 16, 76, 34, bg);
 
-    // eyes — shape depends on mood
+    // eyes - shape depends on mood
     uint16_t eye = 0x0000;
     if (blinking) {
         face_canvas->drawFastHLine(44, 60, 14, eye);
@@ -129,7 +129,7 @@ void face_draw(FoxMood mood) {
     }
     // nose
     face_canvas->fillTriangle(60, 76, 68, 76, 64, 82, eye);
-    // mouth — opens with mouth_open while speaking
+    // mouth - opens with mouth_open while speaking
     int mo = (int)(mouth_open * 12);
     if (mo < 1) {
         face_canvas->drawArc(64, 84, 8, 8, 20, 160, eye);
@@ -253,16 +253,26 @@ static void face_lipsync_from_mic_once() {
 
 // Standalone "reactive puppet" app.
 void face_lipsync_mode() {
+    // Puppet mode is self-contained: it sets its own mic state on entry so it is
+    // NEVER affected by whatever push-to-talk / recognition did before it.
+    //  - amp OFF (no feedback), mic at puppet gain, fresh mic session
+    //  - reset the lip ceiling so the first words aren't under/over-driven
+    if (!g_echo_ok) { speak("my ears aren't working right now~"); return; }
     audio_speaker_end();
-    if (!g_echo_ok) return;
-    audio_mic_speech_gain(false);   // puppet gain, regardless of prior PTT state
-
+    audio_mic_speech_gain(false);
+    audio_mic_end();                 // drop any half-open capture from before
+    s_lip_max = 10.0f; s_last_loud = millis();
+    face_caption("puppet mode - click to stop");
+    uint32_t t0 = millis();
     while (true) {
         M5.update();
-        if (M5.BtnA.wasClicked()) break;
+        if (M5.BtnA.wasClicked() || M5.BtnA.wasDoubleClicked()) break;
         face_lipsync_from_mic_once();
         face_draw(MOOD_HAPPY);
         delay(1);
     }
+    face_set_mouth(0);
     audio_mic_end();
+    face_draw(MOOD_HAPPY);
+    (void)t0;
 }

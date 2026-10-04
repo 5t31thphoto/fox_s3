@@ -649,3 +649,84 @@ void tool_menu_probe_sniff() {
     speak(probe_count ? (String("saw ") + probe_count + " different network names being sought")
                       : String("no probe requests that time. phones nearby must be quiet~"));
 }
+
+// ===========================================================================
+//  DEVICE LIST — a visual, scrollable list of nearby WiFi APs and BLE devices
+//  with live signal bars. Tilt up/down to scroll, click to rescan, double to
+//  exit. Nothing is saved; this is the "what's around me" screen.
+// ===========================================================================
+struct DevRow { char name[26]; int8_t rssi; uint8_t kind; };   // kind 0=wifi 1=ble
+static int dev_rssi_bars(int rssi) {                 // -50..-90 -> 4..0 bars
+    if (rssi >= -55) return 4; if (rssi >= -65) return 3;
+    if (rssi >= -75) return 2; if (rssi >= -85) return 1; return 0;
+}
+void tool_menu_device_list() {
+    speak("let me see who's nearby~");
+    const int CAP = 40;
+    DevRow* rows = (DevRow*)fox_alloc(sizeof(DevRow) * CAP);
+    if (!rows) { speak("not enough memory for that right now"); return; }
+    int top = 0;
+    for (;;) {
+        int n = 0;
+        // WiFi
+        tool_radio_acquire();
+        WiFi.mode(WIFI_STA);
+        int wn = WiFi.scanNetworks(false, true);
+        for (int i = 0; i < wn && n < CAP; ++i) {
+            String s = WiFi.SSID(i); if (!s.length()) s = "(hidden)";
+            strncpy(rows[n].name, s.c_str(), 25); rows[n].name[25] = 0;
+            rows[n].rssi = (int8_t)WiFi.RSSI(i); rows[n].kind = 0; ++n;
+        }
+        WiFi.scanDelete();
+        // BLE
+        ble_begin_once();
+        BLEScanResults* res = ble_scan->start(3, false);
+        int bn = res ? res->getCount() : 0;
+        for (int i = 0; i < bn && n < CAP; ++i) {
+            BLEAdvertisedDevice d = res->getDevice(i);
+            String nm = d.haveName() ? String(d.getName().c_str())
+                                     : String(d.getAddress().toString().c_str());
+            strncpy(rows[n].name, nm.c_str(), 25); rows[n].name[25] = 0;
+            rows[n].rssi = (int8_t)d.getRSSI(); rows[n].kind = 1; ++n;
+        }
+        if (ble_scan) ble_scan->clearResults();
+        // sort by signal (simple insertion sort, n<=40)
+        for (int i = 1; i < n; ++i) { DevRow k = rows[i]; int j = i - 1;
+            while (j >= 0 && rows[j].rssi < k.rssi) { rows[j+1] = rows[j]; --j; } rows[j+1] = k; }
+
+        bool rescan = false;
+        uint32_t shown = millis();
+        while (millis() - shown < 30000) {
+            M5.update();
+            if (M5.BtnA.wasDoubleClicked()) { heap_caps_free(rows); tool_radio_release(); return; }
+            if (M5.BtnA.wasClicked()) { rescan = true; break; }
+            float rx, ry; tilt_xy(&rx, &ry);
+            if (ry > 0.5f && top < n - 6) { top++; delay(120); }
+            if (ry < -0.5f && top > 0)    { top--; delay(120); }
+            face_canvas->fillSprite(cfg.color_bg);
+            face_canvas->setTextDatum(top_left); face_canvas->setTextSize(1);
+            face_canvas->setTextColor(cfg.color_accent);
+            char hdr[24]; snprintf(hdr, sizeof hdr, "NEARBY  %d found", n);
+            face_canvas->drawString(hdr, 2, 1);
+            for (int r = 0; r < 6 && top + r < n; ++r) {
+                DevRow& d = rows[top + r]; int y = 14 + r * 18;
+                uint16_t col = d.kind ? 0x5D1F : 0x07E0;   // ble bluish, wifi green
+                face_canvas->fillRoundRect(2, y, 10, 10, 2, col);
+                face_canvas->setTextColor(0x0000);
+                face_canvas->drawString(d.kind ? "B" : "W", 4, y + 1);
+                int bars = dev_rssi_bars(d.rssi);
+                for (int b = 0; b < 4; ++b)
+                    face_canvas->fillRect(108 + b * 4, y + 9 - b * 3, 3, 1 + b * 3,
+                                          b < bars ? col : 0x3186);
+                face_canvas->setTextColor(0xFFFF);
+                char nm[20]; strncpy(nm, d.name, 16); nm[16] = 0;
+                face_canvas->drawString(nm, 16, y + 1);
+            }
+            face_canvas->setTextColor(0x9CD3); face_canvas->setTextDatum(bottom_center);
+            face_canvas->drawString("tilt=scroll click=rescan", 64, 127);
+            face_canvas->pushSprite(0, 0);
+            delay(16);
+        }
+        if (!rescan) { heap_caps_free(rows); tool_radio_release(); return; }
+    }
+}

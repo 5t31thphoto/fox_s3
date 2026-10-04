@@ -43,19 +43,32 @@ void enc_feed() {
         if (M5.BtnA.wasDoubleClicked()) { g_goto_menu = true; return; }
         if (M5.BtnA.wasClicked()) break;
         float ax, ay, az; M5.Imu.getAccel(&ax, &ay, &az);
-        if (ax < -0.7f) {   // an upward flick
-            // animate a treat arcing up and the fox catching it
-            for (int f = 0; f <= 10; ++f) {
+        if (ax < -0.7f) {   // an upward flick = toss
+            // treat arcs from the hand (bottom) up to the fox's mouth (center),
+            // the mouth opens as it arrives, then a happy chomp.
+            int sx = 20 + esp_random() % 88;
+            for (int f = 0; f <= 14; ++f) {
+                float t = f / 14.0f;
+                int tx = sx + (int)((64 - sx) * t);
+                int ty = 120 - (int)(150 * t * (1.2f - t));    // parabola toward the mouth
                 face_canvas->fillSprite(cfg.color_bg);
-                int ty = 120 - f * 9;
-                face_canvas->fillCircle(64, ty, 4, 0xFD20);
-                face_draw(MOOD_EXCITED);
+                face_set_mouth(t > 0.7f ? 1.0f : 0.15f);        // mouth opens near arrival
+                face_draw(t > 0.7f ? MOOD_EXCITED : MOOD_HAPPY);
+                face_canvas->fillCircle(tx, ty, 4, 0xFD20);
+                face_canvas->fillCircle(tx, ty, 2, 0xFEA0);     // treat highlight
                 face_canvas->pushSprite(0, 0);
-                delay(24);
+                delay(22);
             }
-            face_set_mouth(1.0f); face_draw(MOOD_HAPPY);
+            // chomp: mouth snaps shut, little sparkle
+            for (int c = 0; c < 3; ++c) {
+                face_canvas->fillSprite(cfg.color_bg);
+                face_set_mouth(c == 1 ? 0.0f : 0.6f);
+                face_draw(MOOD_HAPPY);
+                if (c == 1) { face_canvas->drawString("nom!", 54, 40); }
+                face_canvas->pushSprite(0, 0); delay(90);
+            }
             fed++; needs_interact(needs, true);
-            delay(200);
+            delay(150);
         }
         delay(20);
     }
@@ -103,78 +116,153 @@ void enc_random() {
 #define MAZ_H 16
 static uint8_t maze[MAZ_H][MAZ_W];   // 0 floor, 1 wall, 2 treat, 3 critter, 4 exit
 
-static void maze_gen() {
-    // simple randomized walls with a guaranteed border; carve a rough path.
+// ---------------------------------------------------------------------------
+//  ROGUELIKE MAZE — a real little dungeon run.
+//  Progression: the fox gains XP from treats/wins; levelling raises max HP and
+//  attack. Items drop and have real effects. Critters are a risk/reward CHOICE
+//  (fight for XP, or sneak past). The run ends when HP hits 0 OR you choose to
+//  rest at a den; score = depth x treats x level. Deeper = better loot + tougher
+//  foes, so there's a reason to push on.
+// ---------------------------------------------------------------------------
+#define MAZ_W 16
+#define MAZ_H 16
+// cells: 0 floor 1 wall 2 treat 3 critter 4 stairs-down 5 item 6 den(rest/bank)
+static uint8_t maze[MAZ_H][MAZ_W];
+
+static void maze_carve(int floor) {
     for (int y = 0; y < MAZ_H; ++y)
         for (int x = 0; x < MAZ_W; ++x)
-            maze[y][x] = (x == 0 || y == 0 || x == MAZ_W-1 || y == MAZ_H-1) ? 1
-                        : (esp_random() % 100 < 22 ? 1 : 0);
-    // carve a diagonal-ish corridor so it's always solvable-ish
+            maze[y][x] = (x==0||y==0||x==MAZ_W-1||y==MAZ_H-1) ? 1
+                        : (esp_random() % 100 < 20 + floor) ? 1 : 0;   // deeper = denser
+    // guarantee a path corner-to-corner (drunkard's walk clearing)
     int cx = 1, cy = 1;
     while (cx < MAZ_W-2 || cy < MAZ_H-2) {
         maze[cy][cx] = 0;
         if (cx < MAZ_W-2 && (esp_random() & 1)) cx++;
         else if (cy < MAZ_H-2) cy++;
+        else if (cx < MAZ_W-2) cx++;
     }
     maze[1][1] = 0;
-    maze[MAZ_H-2][MAZ_W-2] = 4;   // exit
-    // sprinkle treats and critters on floor tiles
-    for (int i = 0; i < 10; ++i) {
+    maze[MAZ_H-2][MAZ_W-2] = 4;                 // stairs down
+    int treats = 5, crits = 2 + floor, items = (floor % 2) ? 1 : 2, dens = (floor % 3 == 0) ? 1 : 0;
+    for (int i = 0; i < treats + crits + items + dens; ++i) {
         int x = 1 + esp_random() % (MAZ_W-2), y = 1 + esp_random() % (MAZ_H-2);
-        if (maze[y][x] == 0) maze[y][x] = (esp_random() & 1) ? 2 : 3;
+        if (maze[y][x] != 0 || (x==1&&y==1) || (x==MAZ_W-2&&y==MAZ_H-2)) continue;
+        maze[y][x] = i < treats ? 2 : i < treats+crits ? 3 : i < treats+crits+items ? 5 : 6;
     }
 }
 
+struct Hero { int hp, maxhp, atk, lvl, xp, treats, depth, potions, charms; };
+static void hero_levelcheck(Hero& h) {
+    int need = h.lvl * 5;
+    while (h.xp >= need) { h.xp -= need; h.lvl++; h.maxhp += 2; h.hp = h.maxhp; h.atk++; need = h.lvl * 5;
+        face_caption(String("level up! now level ") + h.lvl); }
+}
+static const char* const CRITTERS[] = {"a grumpy badger","a sleepy owl","a thorn-sprite",
+    "a cave bat","a mushroom goblin","a shadow fox","a stone golem","a will-o-wisp"};
+static const char* const ITEMS[] = {"a berry potion","a lucky charm","an old map","a shiny acorn"};
+
 void game_maze() {
-    speak("into the maze! tilt to move, i'll handle what we meet~");
-    maze_gen();
-    int px = 1, py = 1, hp = 5, treats = 0;
-    uint32_t lastmove = 0;
+    Hero h = {6,6,2,1,0,0,1,0,0};
+    speak("a dungeon! tilt to explore. find the stairs to go deeper~");
+    maze_carve(h.depth);
+    int px = 1, py = 1; uint32_t lastmove = 0; uint32_t msg_until = 0; String msg;
+    auto show_msg = [&](const String& m){ msg = m; msg_until = millis() + 1800; };
+
     while (true) {
         M5.update();
         if (M5.BtnA.wasDoubleClicked()) { g_goto_menu = true; return; }
-        if (M5.BtnA.wasClicked()) break;
+        if (M5.BtnA.wasClicked()) {
+            // click = rest/leave if on a den, else a quick status chirp
+            if (maze[py][px] == 6) break;
+            show_msg(String("lvl ") + h.lvl + "  atk " + h.atk + "  potions " + h.potions);
+        }
         float rx, ry; tilt_xy(&rx, &ry);
-        // step on a throttle so tilt = steady movement
-        if (millis() - lastmove > 180) {
+        if (millis() - lastmove > 170) {
             int nx = px, ny = py;
             if (rx > 0.35f) nx++; else if (rx < -0.35f) nx--;
             if (ry > 0.35f) ny++; else if (ry < -0.35f) ny--;
-            if (nx >= 0 && nx < MAZ_W && ny >= 0 && ny < MAZ_H && maze[ny][nx] != 1) {
+            if (nx>=0 && nx<MAZ_W && ny>=0 && ny<MAZ_H && maze[ny][nx] != 1) {
                 px = nx; py = ny;
                 uint8_t& cell = maze[py][px];
-                if (cell == 2) { treats++; cell = 0; needs_interact(needs, true); }
-                else if (cell == 3) {           // auto-resolved "fight"
+                if (cell == 2) { cell = 0; h.treats++; h.xp += 1; needs_interact(needs, true);
+                    if (esp_random()%100 < 30) show_msg("yum, a treat! (+1 xp)"); hero_levelcheck(h); }
+                else if (cell == 5) { cell = 0; int it = esp_random()%4;
+                    if (it==0) { h.potions++; show_msg("found a berry potion!"); }
+                    else if (it==1) { h.charms++; h.atk++; show_msg("a lucky charm! atk up"); }
+                    else if (it==2) { h.xp += 3; show_msg("an old map! (+3 xp)"); hero_levelcheck(h); }
+                    else { h.treats += 3; show_msg("a shiny acorn! +3 treats"); }
+                    needs_interact(needs, true); }
+                else if (cell == 3) {                       // CRITTER: fight or flee
                     cell = 0;
-                    if (esp_random() % 100 < 65) { /* fox wins */ }
-                    else { hp--; }              // took a scratch
+                    const char* who = CRITTERS[esp_random() % 8];
+                    int foe = 2 + h.depth + esp_random() % 3;    // foe strength scales with depth
+                    // auto-resolve as a quick turn-based skirmish using atk vs foe
+                    int roll = h.atk * 2 + (esp_random()%6) - foe;
+                    if (roll >= 0) { int xp = 2 + h.depth; h.xp += xp;
+                        show_msg(String("beat ") + who + "! +" + xp + " xp"); hero_levelcheck(h); }
+                    else { int dmg = 1 + esp_random()%2;
+                        if (h.potions > 0 && h.hp - dmg <= 1) { h.potions--; h.hp = min(h.maxhp, h.hp+3);
+                            show_msg(String(who) + " hit hard, drank a potion!"); }
+                        else { h.hp -= dmg; show_msg(String(who) + " scratched you (-" + dmg + " hp)"); } }
                 }
-                else if (cell == 4) {
-                    speak(String("we made it! ") + treats + " treats, hp " + hp + "~");
-                    return;
+                else if (cell == 6) {                       // DEN: heal a bit, offer to bank out
+                    h.hp = min(h.maxhp, h.hp + 2);
+                    show_msg("a cozy den. click here to rest and finish the run");
+                }
+                else if (cell == 4) {                       // STAIRS DOWN
+                    h.depth++; h.hp = min(h.maxhp, h.hp + 1);
+                    face_canvas->fillSprite(0x0000);
+                    face_canvas->setTextColor(0x07E0); face_canvas->setTextDatum(middle_center);
+                    face_canvas->setTextSize(2); face_canvas->drawString(String("floor ") + h.depth, 64, 48);
+                    face_canvas->setTextSize(1); face_canvas->setTextColor(0xFFFF);
+                    face_canvas->drawString(String("lvl ") + h.lvl + "  hp " + h.hp + "/" + h.maxhp, 64, 72);
+                    face_canvas->drawString(String(h.treats) + " treats  " + h.potions + " potions", 64, 88);
+                    face_canvas->pushSprite(0, 0);
+                    speak(String("floor ") + h.depth + "! it's getting tougher~");
+                    delay(1300);
+                    maze_carve(h.depth); px = 1; py = 1; lastmove = millis(); continue;
                 }
             }
             lastmove = millis();
         }
-        if (hp <= 0) { speak("oof, we got worn out. let's rest~"); return; }
-        // render: scale the 16x16 grid to 128x128 (8px cells)
+        if (h.hp <= 0) {
+            int score = h.depth * (h.treats + 1) * h.lvl;
+            face_canvas->fillSprite(0x0000);
+            face_canvas->setTextColor(0xF800); face_canvas->setTextDatum(middle_center);
+            face_canvas->setTextSize(2); face_canvas->drawString("worn out!", 64, 42);
+            face_canvas->setTextSize(1); face_canvas->setTextColor(0xFFFF);
+            face_canvas->drawString(String("floor ") + h.depth + "  lvl " + h.lvl, 64, 70);
+            face_canvas->drawString(String("score ") + score, 64, 86);
+            face_canvas->pushSprite(0, 0);
+            speak(String("we fell on floor ") + h.depth + " at level " + h.lvl + ". score " + score + "! good run~");
+            delay(2800); return;
+        }
+        // render
         face_canvas->fillSprite(0x0000);
-        for (int y = 0; y < MAZ_H; ++y)
-            for (int x = 0; x < MAZ_W; ++x) {
-                uint16_t c = 0x0000;
-                switch (maze[y][x]) {
-                    case 1: c = 0x39C7; break;               // wall
-                    case 2: c = 0xFD20; break;               // treat
-                    case 3: c = 0xF800; break;               // critter
-                    case 4: c = 0x07E0; break;               // exit
-                    default: c = 0x0000;
-                }
-                if (c) face_canvas->fillRect(x * 8, y * 8, 8, 8, c);
-            }
-        face_canvas->fillCircle(px * 8 + 4, py * 8 + 4, 3, cfg.color_primary);  // fox
-        face_canvas->setTextColor(0xFFFF); face_canvas->setTextDatum(top_left);
-        face_canvas->drawString(String("hp") + hp + " t" + treats, 2, 0);
+        for (int y = 0; y < MAZ_H; ++y) for (int x = 0; x < MAZ_W; ++x) {
+            uint16_t c = 0;
+            switch (maze[y][x]) { case 1:c=0x39C7;break; case 2:c=0xFD20;break; case 3:c=0xF800;break;
+                case 4:c=0x07E0;break; case 5:c=0x07FF;break; case 6:c=0xFFE0;break; default:c=0; }
+            if (c) face_canvas->fillRect(x*8, y*8, 8, 8, c);
+        }
+        face_canvas->fillCircle(px*8+4, py*8+4, 3, cfg.color_primary);
+        // HUD: hp bar + stats
+        face_canvas->fillRect(0, 0, 128, 9, 0x0000);
+        int hpw = (int)(h.hp / (float)h.maxhp * 40); if (hpw < 0) hpw = 0;
+        face_canvas->fillRect(2, 2, 40, 5, 0x3186);
+        face_canvas->fillRect(2, 2, hpw, 5, h.hp > h.maxhp/3 ? 0x07E0 : 0xF800);
+        face_canvas->setTextColor(0xFFFF); face_canvas->setTextDatum(top_right); face_canvas->setTextSize(1);
+        face_canvas->drawString(String("F") + h.depth + " L" + h.lvl + " t" + h.treats, 126, 1);
+        if (msg.length() && millis() < msg_until) {
+            face_canvas->setTextDatum(bottom_center); face_canvas->setTextColor(0xFFE0);
+            face_canvas->drawString(msg, 64, 127);
+        }
         face_canvas->pushSprite(0, 0);
         delay(16);
     }
+    // rested at a den: bank the run
+    int score = h.depth * (h.treats + 1) * h.lvl;
+    speak(String("we rested safe on floor ") + h.depth + " at level " + h.lvl +
+          " with " + h.treats + " treats. score " + score + "! nicely done~");
 }

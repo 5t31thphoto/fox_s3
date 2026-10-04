@@ -25,11 +25,21 @@ def strip(s):  # drop comments and string/char literals, keep line structure
 lines = strip("".join(expand("fox_main.cpp", set()))).split("\n")
 decl = {}   # name -> first line where declared (definition or prototype)
 pat = re.compile(r'^(?:static\s+)?(?:inline\s+)?(?:const\s+)?[A-Za-z_][\w:<>,\s\*&]*?[\s\*&]([A-Za-z_]\w*)\s*(\(|=|;|\[)')
+depth = 0
+decl_depth = {}
 for i, l in enumerate(lines):
-    if not l or l[0] in " \t#}" or l.startswith(("struct", "enum", "using", "typedef", "template", "class", "return")): continue
+    # track brace depth so we only consider TRUE file-scope (depth 0) decls
+    stripped_depth = depth
+    if not l or l[0] in " \t#}" or l.startswith(("struct", "enum", "using", "typedef", "template", "class", "return", "namespace")):
+        depth += l.count("{") - l.count("}")
+        continue
+    if stripped_depth != 0:
+        depth += l.count("{") - l.count("}")
+        continue
     m = pat.match(l)
     if m and m.group(1) not in decl and m.group(1) not in ("if", "for", "while", "switch"):
         decl[m.group(1)] = i
+    depth += l.count("{") - l.count("}")
 # names prototyped in the project headers are declared before any use
 hdr = set()
 for h in ("fox.h", "fox_decls.h", "foxese.h", "fox_audio.h"):

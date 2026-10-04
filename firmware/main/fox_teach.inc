@@ -38,7 +38,8 @@ static bool teach_save() {
 // taught lines never replace these.
 static bool teach_is_logic(const char* id) {
     static const char* const L[] = {"c_yes", "c_no", "c_maybe", "c_why", "c_more", "c_you",
-        "c_askme", "c_whatdo", "c_story", "c_lonely", "c_angry", "c_cheer", "t_sad", "t_bored", "t_name"};
+        "c_askme", "c_whatdo", "c_story", "c_lonely", "c_angry", "c_cheer", "t_sad", "t_bored", "t_name",
+        "c_coin", "c_dice", "c_number", "c_eightball", "c_trick", "c_noise", "c_sing"};
     for (const char* x : L) if (!strcmp(x, id)) return true;
     return false;
 }

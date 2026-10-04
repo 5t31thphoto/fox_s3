@@ -29,7 +29,8 @@
 #include <esp_heap_caps.h>
 #include <esp_log.h>
 #include "brain_policy.h"     // act/feel names (trainer-generated)
-#include "mn_phonemes.h"      // MultiNet phonemes (CI-generated; empty = runtime G2P)
+#include "mn_phonemes.h"      // MultiNet phonemes (CI-generated)
+#define FOX_PRECOMPUTED_PHONEMES 1   // ON: Espressif's documented path (empty table = runtime G2P)
 #include <esp_partition.h>
 #include <math.h>
 #include <ctype.h>
@@ -354,9 +355,13 @@ static bool init_speech() {
             if (!k) continue;
             // Espressif's recommended path: precomputed phonemes (CI-generated
             // with their multinet_g2p alphabet). Runtime G2P only as fallback.
+            // Espressif's recommended path: precomputed phonemes (CI-generated
+            // with their multinet_g2p alphabet). Runtime G2P only as fallback.
             const char* phon = nullptr;
+#if FOX_PRECOMPUTED_PHONEMES
             for (int q = 0; q < MN_PHONEMES_N; ++q)
                 if (MN_PHONEMES[q].text && !strcmp(MN_PHONEMES[q].text, ph)) { phon = MN_PHONEMES[q].ph; break; }
+#endif
             esp_err_t r = phon ? esp_mn_commands_phoneme_add(COMMANDS[i].id, ph, phon)
                                : esp_mn_commands_add(COMMANDS[i].id, ph);
             if (r == ESP_OK) { ++added; if (phon) ++with_phonemes; }
@@ -386,7 +391,8 @@ static bool init_speech() {
     return true;
 }
 
-static int recognize_offline(int16_t* audio, size_t samples, int* best_id = nullptr, float* best_prob = nullptr) {
+static int recognize_offline(int16_t* audio, size_t samples, int* best_id = nullptr, float* best_prob = nullptr,
+                             bool expecting_answer = false) {
     if (!speech_ready || !audio || samples < SAMPLE_RATE / 4) return -1;
     // MultiNet takes raw 16 kHz mono directly (Espressif's own MultiNet file
     // test feeds it this way). The AFE front-end produced NO output for PTT
@@ -396,41 +402,84 @@ static int recognize_offline(int16_t* audio, size_t samples, int* best_id = null
     int16_t* in = (int16_t*)fox_alloc(chunk * sizeof(int16_t));
     if (!in) return -1;
 
-    // Level-normalise to a comfortable RMS so MultiNet sees speech at a
-    // consistent loudness (no AGC without the AFE). Gain clamped 0.25x..4x.
-    uint64_t sq = 0; for (size_t i = 0; i < samples; ++i) sq += (int32_t)audio[i] * audio[i];
-    float rms = sqrtf((float)(sq / samples));
+    // ---- condition a COPY for MultiNet (Whisper keeps the original) ---------
+    // 1) high-pass ~80 Hz: removes codec DC offset and rumble
+    // 2) loudness measured on SPEECH frames only (silence used to drag the
+    //    average down -> gain up to 4x -> speech hard-clipped -> low scores)
+    // 3) gain capped so the loudest peak lands at ~-3 dBFS: never clips
+    float* x = (float*)fox_alloc(samples * sizeof(float));
+    if (!x) { heap_caps_free(in); return -1; }
+    float prev_in = audio[0], prev_out = 0.0f, peak = 1.0f;
+    for (size_t i = 0; i < samples; ++i) {
+        float v = (float)audio[i];
+        float y = v - prev_in + 0.969f * prev_out;       // 1st-order DC-blocking high-pass
+        prev_in = v; prev_out = y; x[i] = y;
+        if (fabsf(y) > peak) peak = fabsf(y);
+    }
+    const size_t F = 320;                                // 20 ms frames
+    float frame_e[1024]; size_t nf = 0;
+    for (size_t s = 0; s + F <= samples && nf < 1024; s += F) {
+        double e = 0; for (size_t i = s; i < s + F; ++i) e += x[i] * x[i];
+        frame_e[nf++] = (float)(e / F);
+    }
+    float emax = 0; for (size_t i = 0; i < nf; ++i) if (frame_e[i] > emax) emax = frame_e[i];
+    double sp = 0; size_t ns = 0;                        // speech = frames within 20 dB of the loudest
+    for (size_t i = 0; i < nf; ++i) if (frame_e[i] >= emax * 0.01f) { sp += frame_e[i]; ++ns; }
+    float rms = ns ? sqrtf((float)(sp / ns)) : 1.0f;
     float g = rms > 1.0f ? 3000.0f / rms : 1.0f;
+    g = fminf(g, 23000.0f / peak);                       // peaks at most ~-3 dBFS: no clipping
     g = fminf(4.0f, fmaxf(0.25f, g));
+    Serial.printf("FOX: MN input speech_rms=%.0f peak=%.0f speech_frames=%u/%u gain=%.2f\n",
+                  rms, peak, (unsigned)ns, (unsigned)nf, g);
 
-    // Utterance + ~0.8 s of silence: MultiNet commits a result only after
-    // trailing silence, and PTT audio ends the instant the button is released.
-    const size_t total = samples + SAMPLE_RATE * 8 / 10;
+    // ~0.25 s lead-in silence, the utterance, then ~0.8 s of silence: MultiNet
+    // commits a result only after trailing silence (PTT ends at release).
+    const size_t lead = SAMPLE_RATE / 4;
+    const size_t total = lead + samples + SAMPLE_RATE * 8 / 10;
     int found_id = -1; float found_prob = 0.0f; int chunks = 0;
+    int runner_id = -1; float runner_prob = 0.0f;
     const char* why = "no-result";
     for (size_t pos = 0; pos < total; pos += chunk) {
         for (int k = 0; k < chunk; ++k) {
             size_t s = pos + k;
-            float v = (s < samples) ? audio[s] * g : 0.0f;
+            float v = (s >= lead && s < lead + samples) ? x[s - lead] * g : 0.0f;
             in[k] = (int16_t)fmaxf(-32767.0f, fminf(32767.0f, v));
         }
         ++chunks;
         esp_mn_state_t st = mn->detect(mn_data, in);
         if (st == ESP_MN_STATE_DETECTED) {
             esp_mn_results_t* res = mn->get_results(mn_data);
-            if (res && res->num > 0) { found_id = res->command_id[0]; found_prob = res->prob[0]; }
+            if (res && res->num > 0) {
+                found_id = res->command_id[0]; found_prob = res->prob[0];
+                // runner-up = best candidate for a DIFFERENT command (same id = same meaning)
+                for (int r = 1; r < res->num; ++r)
+                    if (res->command_id[r] != found_id) { runner_id = res->command_id[r]; runner_prob = res->prob[r]; break; }
+            }
             why = "detected"; break;
         }
         if (st == ESP_MN_STATE_TIMEOUT) { why = "mn-timeout"; break; }
     }
     heap_caps_free(in);
-    Serial.printf("FOX: MultiNet id=%d prob=%.2f (%s, chunk=%d n=%d gain=%.2f rms=%.0f)\n",
-                  found_id, found_prob, why, chunk, chunks, g, rms);
+    heap_caps_free(x);
     if (best_id) *best_id = found_id;
     if (best_prob) *best_prob = found_prob;
-    if (found_id < 0) return -1;
-    float need = (found_id >= 60) ? MIN_TOPIC_PROB : MIN_COMMAND_PROB;
-    return (found_prob >= need) ? found_id : -1;
+    if (found_id < 0) {
+        Serial.printf("FOX: MultiNet heard nothing (%s, n=%d gain=%.2f rms=%.0f)\n", why, chunks, g, rms);
+        return -1;
+    }
+    // Accept when: confident enough, OR clearly ahead of the runner-up, OR it is
+    // the yes/no/maybe she is WAITING for (an expected answer needs less proof;
+    // otherwise a quiet "yes" to "did you mean...?" would itself need confirming).
+    const bool glue = found_id >= 100 && found_id <= 102;          // c_yes / c_no / c_maybe
+    const float need = (found_id >= 60) ? MIN_TOPIC_PROB : MIN_COMMAND_PROB;
+    const float margin = found_prob - runner_prob;
+    const char* rule = nullptr;
+    if (found_prob >= need)                                rule = "confident";
+    else if (found_prob >= 0.15f && margin >= 0.10f)       rule = "clear-margin";
+    else if (expecting_answer && glue && found_prob >= 0.08f) rule = "expected-answer";
+    Serial.printf("FOX: MultiNet id=%d prob=%.2f runner=%d/%.2f -> %s\n",
+                  found_id, found_prob, runner_id, runner_prob, rule ? rule : "unsure");
+    return rule ? found_id : -1;
 }
 
 // ============================================================================
@@ -1408,7 +1457,14 @@ static const char* match_local_phrase(const String& text, bool loose = false) {
 static void handle_free_text(const String& text) {
     if (!text.length()) { speak(fox_idle_line(fox_mood(needs))); return; }
     if (cfg.persistence) mem_append("you", text);
-    // 0) a phrase you taught her
+    // 0) a yes/no she is waiting for (an offer or question is pending)
+    if ((chat.offer || chat.ask) && chat_fresh()) {
+        String w = text; w.toLowerCase(); w.trim();
+        auto starts = [&](const char* p) { return w.startsWith(p); };
+        if (starts("yes") || starts("yeah") || starts("yep") || starts("sure") || starts("okay") || starts("ok") || starts("yup")) { do_action("c_yes"); return; }
+        if (starts("no") || starts("nope") || starts("nah") || starts("not now")) { do_action("c_no"); return; }
+    }
+    // 0b) a phrase you taught her
     int tk = teach_custom_match(text);
     if (tk >= 0) {
         g_brain_ctx = BrainCtx{ACT_ANSWER, feel_idx(), (uint8_t)(chat.turn > 2 ? 2 : chat.turn), true};
@@ -1470,7 +1526,8 @@ static void process_utterance(int16_t* audio, size_t n) {
     // Offline command grammar first (needs model partition + MultiNet).
     chat_user_spoke();
     int guess_id = -1; float guess_prob = 0;
-    int id = speech_ready ? recognize_offline(audio, n, &guess_id, &guess_prob) : -1;
+    const bool expecting = (chat.offer || chat.ask) && chat_fresh();
+    int id = speech_ready ? recognize_offline(audio, n, &guess_id, &guess_prob, expecting) : -1;
     const char* act = nullptr;
     for (size_t i = 0; id >= 0 && i < COMMAND_COUNT; ++i)
         if (COMMANDS[i].id == id) { act = COMMANDS[i].action; break; }
@@ -1481,6 +1538,9 @@ static void process_utterance(int16_t* audio, size_t n) {
         speak(teach_custom_pick(id - TEACH_CUSTOM_ID0));
         return;
     }
+    // An answer she's WAITING for (yes/no/maybe to an offer or question) is
+    // resolved right here — never sent to the cloud, where it would be lost.
+    if (act && expecting && id >= 100 && id <= 102) { s_miss_streak = 0; do_action(act); return; }
     // A recognised device COMMAND always runs locally (instant, reliable).
     if (act && id < 60) { s_miss_streak = 0; do_action(act); return; }
     // Conversation: the online brain answers when it's switched on; the offline
@@ -1492,7 +1552,12 @@ static void process_utterance(int16_t* audio, size_t n) {
     if (act) { s_miss_streak = 0; do_action(act); return; }
     // Recognition and conversation working together: a half-confident match is
     // CONFIRMED instead of guessed or ignored. "yes" runs it via the offer.
-    if (guess_id >= 0 && guess_prob >= 0.15f) {
+    // ...but never "did you mean, yes?", and never twice in a row (that looped).
+    static uint32_t s_last_confirm = 0;
+    const bool guess_is_glue = guess_id >= 100 && guess_id <= 108;
+    if (guess_id >= 0 && guess_prob >= 0.12f && !guess_is_glue &&
+        (s_last_confirm == 0 || millis() - s_last_confirm > 20000)) {
+        s_last_confirm = millis();
         for (size_t i = 0; i < COMMAND_COUNT; ++i) {
             if (COMMANDS[i].id != guess_id) continue;
             String first = COMMANDS[i].phrases;

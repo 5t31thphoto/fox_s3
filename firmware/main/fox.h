@@ -28,8 +28,8 @@ static constexpr uint32_t IDLE_SLEEP_MS        = 120000;  // light-sleep after 2
 static constexpr uint32_t CONVERSATION_TIMEOUT = 45000;   // conversation mode silence timeout
 static constexpr uint32_t PTT_MIN_MS           = 200;     // shorter press = open menu
 static constexpr uint32_t PTT_MAX_MS           = 10000;   // hard cap on one utterance
-static constexpr float    MIN_COMMAND_PROB     = 0.40f;   // MultiNet: actions (logged, tunable)
-static constexpr float    MIN_TOPIC_PROB       = 0.30f;   // MultiNet: conversation topics
+static constexpr float    MIN_COMMAND_PROB     = 0.20f;   // tuned from device logs: correct hits land 0.25-0.31
+static constexpr float    MIN_TOPIC_PROB       = 0.18f;   // MultiNet already gated it as DETECTED
 
 // ---- personality / memory ---------------------------------------------------
 static constexpr size_t   MEM_MAX_BYTES = 6000;   // rolling journal cap (kept in a file)

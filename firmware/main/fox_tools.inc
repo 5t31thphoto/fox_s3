@@ -552,7 +552,7 @@ void tool_menu_sniffer() {
     esp_wifi_set_promiscuous_rx_cb(&sniffer_cb);
     esp_wifi_set_promiscuous(true);
     int ch = 1;
-    uint32_t last = 0, started = millis();
+    uint32_t last = 0;
     while (true) {
         M5.update();
         if (M5.BtnA.wasClicked() || M5.BtnA.wasDoubleClicked()) break;

@@ -338,6 +338,7 @@ static void apply_config_json(const String& js) {
         Serial.flush();
         return;
     }
+    if (teach_apply_json(d)) return;          // a "teach" line, not a config line
     if (d["name"].is<const char*>())  cfg.name = d["name"].as<String>();
     if (d["tz"].is<const char*>())    cfg.timezone = d["tz"].as<String>();
     if (d["weather"].is<const char*>()) cfg.weather = d["weather"].as<String>();

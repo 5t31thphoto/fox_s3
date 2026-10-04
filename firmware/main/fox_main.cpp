@@ -49,6 +49,7 @@
 // ============================================================================
 static FoxConfig cfg;
 static FoxNeeds  needs;
+static uint32_t last_activity = 0;   // last user interaction (loop, fox-time, sleep)
 // The online (Groq) brain is used only when a key is configured AND the user
 // has it switched on (menu "brain" / "go online" / "go offline").
 static uint32_t s_online_cool = 0;     // network trouble: skip online calls until this
@@ -287,6 +288,8 @@ static bool model_partition_ready() {
     return true;
 }
 
+#include "fox_teach.inc"   // taught replies + custom phrases + plasticity
+
 static bool init_speech() {
     // Never call esp-sr on an empty/unflashed model partition — it aborts.
     if (!model_partition_ready()) return false;
@@ -359,6 +362,12 @@ static bool init_speech() {
             if (r == ESP_OK) { ++added; if (phon) ++with_phonemes; }
             else Serial.printf("FOX: add failed '%s'\n", ph);
         }
+    }
+    // Phrases YOU taught her to hear (web flasher "Teach your fox").
+    for (int k = 0; k < teach_custom_count(); ++k) {
+        char pb[64];                                   // mutable: some esp-sr versions take char*
+        strncpy(pb, teach_custom_phrase(k).c_str(), sizeof(pb) - 1); pb[sizeof(pb) - 1] = 0;
+        if (pb[0] && esp_mn_commands_add(TEACH_CUSTOM_ID0 + k, pb) == ESP_OK) ++added;
     }
     // update() returns NULL on success, or a non-NULL error list if any phrase
     // could not be parsed. We don't walk the (version-specific) list layout;
@@ -868,9 +877,12 @@ static void chat_touch(const char* topic) { chat.topic = topic; chat.at = millis
 
 static uint8_t feel_idx() {
     const String& f = chat.user_feel;
-    if (f == "sad")    return FEEL_SAD;    if (f == "happy")  return FEEL_HAPPY;
-    if (f == "tired")  return FEEL_TIRED;  if (f == "hungry") return FEEL_HUNGRY;
-    if (f == "scared") return FEEL_SCARED; if (f == "cold" || f == "hot") return FEEL_COLD;
+    if (f == "sad")    return FEEL_SAD;
+    if (f == "happy")  return FEEL_HAPPY;
+    if (f == "tired")  return FEEL_TIRED;
+    if (f == "hungry") return FEEL_HUNGRY;
+    if (f == "scared") return FEEL_SCARED;
+    if (f == "cold" || f == "hot") return FEEL_COLD;
     if (f == "lonely") return FEEL_LONELY;
     return FEEL_NONE;
 }
@@ -878,7 +890,7 @@ static uint8_t feel_idx() {
 // Offer something: the next "yes" runs it, "no" declines, "why" explains.
 static void chat_offer(const String& line, const char* action, const char* why) {
     chat.offer = action; chat.offer_why = why; chat.ask = nullptr; chat.at = millis();
-    ++chat.moves;
+    ++chat.moves; ++s_offers_made;
     g_brain_ctx = BrainCtx{ACT_OFFER, feel_idx(), chat.turn, false};
     speak(line);
 }
@@ -976,7 +988,7 @@ static void chat_offer_activity() {
     static const char* AL[] = {"want to fly the wormhole?", "want to catch some treats?",
                                "want to play twenty questions?", "want to explore the maze?",
                                "want to watch some pretty lights?", "want me to check the weather?"};
-    int k = esp_random() % 6;
+    int k = plas_pick(A, 6);                     // drawn by what you've enjoyed before
     chat_offer(AL[k], A[k], "because doing something together is more fun than doing nothing");
 }
 
@@ -989,6 +1001,7 @@ static void chat_intent_body(const char* id) {
         s_proposal_at = 0; face_caption("");
         if (chat.offer && chat_fresh()) {
             const char* a = chat.offer; chat.offer = nullptr;
+            plas_feedback(a, +2);                    // accepted: strengthen
             if (!strcmp(a, "c_more")) { chat_story_next(); return; }
             speak("yay!");
             do_action(a);                            // any action: command, topic, chat, tool
@@ -1004,8 +1017,10 @@ static void chat_intent_body(const char* id) {
     }
     if (!strcmp(id, "c_no")) {
         s_proposal_at = 0; face_caption("");
-        if (chat.offer && chat_fresh()) { chat.offer = nullptr; speak("okay, maybe later");
-            if (esp_random() % 2) chat_offer_activity(); return; }
+        if (chat.offer && chat_fresh()) { plas_feedback(chat.offer, -1); ++s_offers_declined;
+            chat.offer = nullptr; speak("okay, maybe later");
+            if (esp_random() % 2) chat_offer_activity();
+            return; }
         if (chat.ask && chat_fresh()) {
             const ChatQ* q = chat.ask; chat.ask = nullptr;
             speak(q->no);
@@ -1193,6 +1208,7 @@ static const IntentAct INTENT_ACTS[] = {
 };
 
 static void chat_followup(uint8_t next) {
+    if (next == 2 && plas_prefers_asking()) next = 1;   // you decline offers a lot: ask instead
     switch (next) {
         case 1: chat_ask_question(); break;
         case 2: chat_offer_activity(); break;
@@ -1210,7 +1226,8 @@ template <typename F> static void chat_reply(const char* id, F body) {
     uint32_t moves_before = chat.moves;
     g_brain_next = 0;
     g_brain_ctx = BrainCtx{act, feel_idx(), (uint8_t)(chat.turn > 2 ? 2 : chat.turn), true};
-    body();
+    String alt = teach_or_extra_pick(id);             // your taught lines / adopted seed lines
+    if (alt.length()) speak(alt); else body();
     g_brain_ctx = BrainCtx{};                         // never leak an armed context
     if (chat.moves == moves_before && g_brain_next) chat_followup(g_brain_next);
     Serial.printf("FOX: chat %s act=%s feel=%s turn=%u next=%u\n", id,
@@ -1295,6 +1312,7 @@ static void foxtime_tick() {
     if (s_proposal_at && now > s_proposal_at) {
         s_proposal_at = 0;
         if (chat.offer) {                        // still unanswered
+            plas_feedback(chat.offer, -1); ++s_offers_declined;
             chat.offer = nullptr;
             static const char* S[] = {"...okay, maybe later~", "no? that's okay", "*flops down* later then"};
             face_caption(""); speak(S[esp_random() % 3]);
@@ -1390,6 +1408,13 @@ static const char* match_local_phrase(const String& text, bool loose = false) {
 static void handle_free_text(const String& text) {
     if (!text.length()) { speak(fox_idle_line(fox_mood(needs))); return; }
     if (cfg.persistence) mem_append("you", text);
+    // 0) a phrase you taught her
+    int tk = teach_custom_match(text);
+    if (tk >= 0) {
+        g_brain_ctx = BrainCtx{ACT_ANSWER, feel_idx(), (uint8_t)(chat.turn > 2 ? 2 : chat.turn), true};
+        speak(teach_custom_pick(tk));
+        return;
+    }
     // 1) the fox's own commands/tools always run locally (no LLM needed)
     if (const char* act = match_local_phrase(text)) {
         Serial.printf("FOX: transcript matched local action '%s'\n", act);
@@ -1449,6 +1474,13 @@ static void process_utterance(int16_t* audio, size_t n) {
     const char* act = nullptr;
     for (size_t i = 0; id >= 0 && i < COMMAND_COUNT; ++i)
         if (COMMANDS[i].id == id) { act = COMMANDS[i].action; break; }
+    // A phrase you taught her to hear.
+    if (id >= TEACH_CUSTOM_ID0 && id < TEACH_CUSTOM_ID0 + TEACH_MAX_CUSTOM) {
+        s_miss_streak = 0;
+        g_brain_ctx = BrainCtx{ACT_ANSWER, feel_idx(), (uint8_t)(chat.turn > 2 ? 2 : chat.turn), true};
+        speak(teach_custom_pick(id - TEACH_CUSTOM_ID0));
+        return;
+    }
     // A recognised device COMMAND always runs locally (instant, reliable).
     if (act && id < 60) { s_miss_streak = 0; do_action(act); return; }
     // Conversation: the online brain answers when it's switched on; the offline
@@ -1510,7 +1542,6 @@ static void fox_backlight(uint8_t brightness) {
     Serial.printf("FOX: LP5562 backlight %u\n", brightness);
 }
 
-static uint32_t last_activity = 0;
 static uint32_t last_idle_chatter = 0;
 
 void setup() {

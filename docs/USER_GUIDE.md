@@ -112,6 +112,20 @@ These aren't commands — they're conversation. Her on-device brain decides *how
 
 **How replies work:** when she offers something (*"want to watch some pretty lights?"*), **yes** starts it, **no** declines, **why** gets her reason. When she asks a question, your yes/no answers *that* question. **Tell me more** continues a story. **What about you** gets her side of what you just said.
 
+## Teach your fox
+
+In the web flasher's **Teach your fox** step you can:
+
+- **Give her your own replies** for things you say (pick a phrase like *"i love you"*, type up to 4 replies). She mixes your lines in with her own, and her brain still picks the tone and gesture.
+- **Teach her up to 7 brand-new phrases** to listen for, each with its own replies. New phrases start working after she restarts.
+- **Export / import** your teaching as a file.
+
+Teaching is sent with your settings on first flash, or any time with **Send teaching to fox**.
+
+## She learns what you like
+
+Every offer you accept ("want to explore the maze?" → *yes*) makes that activity more likely next time; every *no* or ignored offer makes it less likely. If you turn down most offers, she starts asking you questions instead. This is remembered across restarts.
+
 ## Fox time
 
 Every few minutes when you're not busy, she may ask to do something — a treat, pets, tug of war, a game, a story. Say **yes** within about 15 seconds, or ignore it and she'll shrug it off.

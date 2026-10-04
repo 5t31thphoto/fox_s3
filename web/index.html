@@ -241,6 +241,32 @@
     <p class="say" id="echo">Waiting to meet your fox…</p>
   </section>
 
+  <section class="step">
+    <h2><span class="pip">4</span>Teach your fox <span class="hint">(optional)</span></h2>
+    <p class="sub">Give her your own replies for things you say, and up to 7 brand-new
+    phrases she learns to hear. Your words are stored on the fox; her brain still
+    decides how she says them. Saved in this browser, sent with your settings.</p>
+    <div class="grid" style="margin-top:12px">
+      <div class="full"><label for="tintent">When you say…</label>
+        <select id="tintent"></select></div>
+      <div class="full"><label>…she might answer <span class="hint">(up to 4)</span></label>
+        <div style="display:grid;gap:6px">
+          <input id="tr0" maxlength="120"><input id="tr1" maxlength="120">
+          <input id="tr2" maxlength="120"><input id="tr3" maxlength="120">
+        </div></div>
+      <div class="full"><label for="tphrase">…or teach a NEW phrase <span class="hint">(letters and spaces; leave blank to use the list above)</span></label>
+        <input id="tphrase" maxlength="60" placeholder="who is the best fox"></div>
+      <div class="full row">
+        <button class="cta ghost" id="tadd" type="button">Save reply set</button>
+        <button class="cta ghost" id="texport" type="button">Export</button>
+        <button class="cta ghost" id="timport" type="button">Import</button>
+        <input type="file" id="tfile" accept="application/json" style="display:none">
+        <button class="cta ghost" id="tsend" type="button">Send teaching to fox →</button>
+      </div>
+      <div class="full"><ul id="tlist" class="hint" style="margin:0;padding-left:18px"></ul></div>
+    </div>
+  </section>
+
   <footer>
     Offline-first · your secrets stay on the device · built for AtomS3R + Atomic Echo Base
   </footer>
@@ -435,6 +461,7 @@
       if(r && r.indexOf('FOX_CONFIG_OK')>=0){
         status.innerHTML='<span class="ok">saved on the fox ✓</span>';
         echo.innerHTML='<span class="ok">Your fox has its new identity. Say hi! 🦊</span>';
+        if(thas()) await sendTeach();
         return true;
       }
       if(r) echo.textContent='fox reported a config error — retrying…';
@@ -443,6 +470,63 @@
     status.innerHTML='<span class="warn">The fox never confirmed the settings.</span>';
     return false;
   }
+
+  // ---- Teach your fox (port of MantisKai's trainer: response SETS, kept varied) ----
+  // TEACHABLE is generated from the firmware's command table at packaging time.
+  /*TEACHABLE_BEGIN*/const TEACHABLE=[{"id": "t_love", "say": "i love you"}, {"id": "t_happy", "say": "i am happy"}, {"id": "t_tired", "say": "i am tired"}, {"id": "t_joke", "say": "tell me a joke"}, {"id": "t_thanks", "say": "thank you"}, {"id": "t_sorry", "say": "sorry"}, {"id": "t_morning", "say": "good morning"}, {"id": "t_bye", "say": "goodbye"}, {"id": "t_praise", "say": "good job"}, {"id": "t_doing", "say": "what are you doing"}, {"id": "t_friend", "say": "do you like me"}, {"id": "c_metoo", "say": "me too"}, {"id": "c_really", "say": "really"}, {"id": "c_wow", "say": "wow"}, {"id": "c_age", "say": "how old are you"}, {"id": "c_home", "say": "where do you live"}, {"id": "c_food", "say": "what do you eat"}, {"id": "c_color", "say": "what is your favorite color"}, {"id": "c_friends", "say": "do you have friends"}, {"id": "c_dream", "say": "do you dream"}, {"id": "c_real", "say": "are you real"}, {"id": "c_hungry", "say": "i am hungry"}, {"id": "c_cold", "say": "i am cold"}, {"id": "c_hot", "say": "i am hot"}, {"id": "c_scared", "say": "i am scared"}, {"id": "c_excited", "say": "i am excited"}, {"id": "c_home_back", "say": "i am home"}, {"id": "c_leaving", "say": "i have to go"}, {"id": "c_work", "say": "i am going to work"}, {"id": "c_miss", "say": "i missed you"}, {"id": "c_birthday", "say": "it is my birthday"}, {"id": "c_funny", "say": "you are funny"}, {"id": "c_mean", "say": "you are annoying"}, {"id": "c_hug", "say": "give me a hug"}, {"id": "c_weather_talk", "say": "it is raining"}, {"id": "c_fact", "say": "tell me a fact"}, {"id": "c_secret", "say": "tell me a secret"}, {"id": "c_sing", "say": "sing a song"}, {"id": "c_compliment", "say": "give me a compliment"}, {"id": "c_trick", "say": "do a trick"}, {"id": "c_noise", "say": "make a noise"}, {"id": "c_coin", "say": "flip a coin"}, {"id": "c_dice", "say": "roll a dice"}, {"id": "c_number", "say": "pick a number"}, {"id": "c_eightball", "say": "yes or no"}];/*TEACHABLE_END*/
+  let teach={i:{},p:[]};
+  try{ const s=localStorage.getItem('fox_teach'); if(s) teach=JSON.parse(s); }catch(e){}
+  const tsave=()=>{ try{ localStorage.setItem('fox_teach', JSON.stringify(teach)); }catch(e){} trender(); };
+  const tsel=document.getElementById('tintent');
+  TEACHABLE.forEach(o=>{ const op=document.createElement('option'); op.value=o.id; op.textContent='"'+o.say+'"'; tsel.appendChild(op); });
+  const tresp=()=>[0,1,2,3].map(k=>document.getElementById('tr'+k).value.trim()).filter(Boolean);
+  function trender(){
+    const ul=document.getElementById('tlist'); ul.innerHTML='';
+    const add=(txt,del)=>{ const li=document.createElement('li'); li.textContent=txt+' ';
+      const b=document.createElement('a'); b.href='#'; b.textContent='remove'; b.onclick=e=>{e.preventDefault(); del(); tsave();};
+      li.appendChild(b); ul.appendChild(li); };
+    Object.keys(teach.i).forEach(id=>{ const say=(TEACHABLE.find(o=>o.id===id)||{say:id}).say;
+      add('"'+say+'" → '+teach.i[id].join(' / '), ()=>{ delete teach.i[id]; }); });
+    teach.p.forEach((e,k)=>add('NEW "'+e.phrase+'" → '+e.r.join(' / '), ()=>{ teach.p.splice(k,1); }));
+    if(!ul.children.length) ul.innerHTML='<li>nothing taught yet</li>';
+  }
+  tsel.onchange=()=>{ const r=teach.i[tsel.value]||[]; [0,1,2,3].forEach(k=>document.getElementById('tr'+k).value=r[k]||''); };
+  document.getElementById('tadd').onclick=()=>{
+    const r=tresp(); const ph=document.getElementById('tphrase').value.toLowerCase().replace(/[^a-z ]/g,'').trim();
+    if(!r.length){ echo.textContent='type at least one reply'; return; }
+    if(ph){
+      if(ph.length<4){ echo.textContent='new phrases need at least 4 letters'; return; }
+      const at=teach.p.findIndex(e=>e.phrase===ph);
+      if(at<0 && teach.p.length>=7){ echo.textContent='she can learn up to 7 new phrases'; return; }
+      if(at<0) teach.p.push({phrase:ph,r}); else teach.p[at].r=r;
+      document.getElementById('tphrase').value='';
+    } else teach.i[tsel.value]=r;
+    tsave(); echo.textContent='saved ✓ — it goes to the fox with your settings, or press Send teaching';
+  };
+  document.getElementById('texport').onclick=()=>{
+    const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([JSON.stringify(teach,null,2)],{type:'application/json'}));
+    a.download='fox-teaching.json'; a.click(); };
+  document.getElementById('timport').onclick=()=>document.getElementById('tfile').click();
+  document.getElementById('tfile').onchange=async e=>{ try{ const d=JSON.parse(await e.target.files[0].text());
+      teach={i:d.i||{},p:(d.p||[]).slice(0,7)}; tsave(); echo.textContent='imported ✓'; }catch(err){ echo.textContent='that file is not fox teaching'; } };
+  const thas=()=>Object.keys(teach.i).length>0 || teach.p.length>0;
+  // send over the live link: clear, then each entry; every line acked FOX_TEACH_OK
+  async function sendTeach(){
+    const lines=[JSON.stringify({teach_clear:true})];
+    Object.keys(teach.i).forEach(id=>lines.push(JSON.stringify({teach:{intent:id,responses:teach.i[id]}})));
+    teach.p.forEach(e=>lines.push(JSON.stringify({teach_phrase:{phrase:e.phrase,responses:e.r}})));
+    for(let k=0;k<lines.length;k++){
+      status.textContent='teaching ('+(k+1)+'/'+lines.length+')…';
+      await send(lines[k]);
+      const r=await waitFor(l=>l.indexOf('FOX_TEACH_OK')>=0||l.indexOf('FOX_TEACH_ERR')>=0, 5000);
+      if(!r || r.indexOf('FOX_TEACH_OK')<0){ status.innerHTML='<span class="warn">teaching stopped: '+(r||'no answer')+'</span>'; return false; }
+    }
+    status.innerHTML='<span class="ok">teaching saved on the fox ✓</span>';
+    if(teach.p.length) echo.innerHTML='<span class="ok">New phrases start working after she restarts.</span>';
+    return true;
+  }
+  document.getElementById('tsend').onclick=async()=>{ if(await connectFox(true)) await sendTeach(); };
+  trender();
   document.getElementById('reconnect').onclick=()=>connectFox(true).then(ok=>{ if(ok) status.innerHTML='<span class="ok">fox connected ✓</span>'; });
 
   // ---- in-browser SAM voice preview (sam-js) ----
@@ -485,7 +569,7 @@
   }
   function configFilled(){
     return !!(val('name') || val('ssid') || val('key') || val('weather') ||
-              document.getElementById('splash').value.trim() || val('pers'));
+              document.getElementById('splash').value.trim() || val('pers') || thas());
   }
 
   // ---- FIRST-FLASH: apply the form automatically once flashing completes ----

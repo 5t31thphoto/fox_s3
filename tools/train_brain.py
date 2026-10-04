@@ -23,7 +23,10 @@ lines like:
   [excited] found your remote ->    found your remote! wag!
 """
 import sys, os, struct, argparse, math, time
-import numpy as np
+try:
+    import numpy as np          # training only; --emit-policy works without it
+except ImportError:
+    np = None
 
 MOODS = ["sleepy", "calm", "happy", "excited", "grumpy"]      # == enum FoxMood
 

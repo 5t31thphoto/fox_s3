@@ -657,8 +657,11 @@ void tool_menu_probe_sniff() {
 // ===========================================================================
 struct DevRow { char name[26]; int8_t rssi; uint8_t kind; };   // kind 0=wifi 1=ble
 static int dev_rssi_bars(int rssi) {                 // -50..-90 -> 4..0 bars
-    if (rssi >= -55) return 4; if (rssi >= -65) return 3;
-    if (rssi >= -75) return 2; if (rssi >= -85) return 1; return 0;
+    if (rssi >= -55) return 4;
+    if (rssi >= -65) return 3;
+    if (rssi >= -75) return 2;
+    if (rssi >= -85) return 1;
+    return 0;
 }
 void tool_menu_device_list() {
     speak("let me see who's nearby~");

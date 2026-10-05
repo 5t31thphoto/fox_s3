@@ -112,12 +112,8 @@ void enc_random() {
 //  auto-collects whatever it walks into (a light auto-play roguelike). Reach
 //  the exit; grab treats, dodge or bump critters. Regenerates each run.
 // ===========================================================================
-#define MAZ_W 16
-#define MAZ_H 16
-static uint8_t maze[MAZ_H][MAZ_W];   // 0 floor, 1 wall, 2 treat, 3 critter, 4 exit
-
 // ---------------------------------------------------------------------------
-//  ROGUELIKE MAZE — a real little dungeon run.
+//  ROGUELIKE MAZE - a real little dungeon run.
 //  Progression: the fox gains XP from treats/wins; levelling raises max HP and
 //  attack. Items drop and have real effects. Critters are a risk/reward CHOICE
 //  (fight for XP, or sneak past). The run ends when HP hits 0 OR you choose to
@@ -186,7 +182,8 @@ void game_maze() {
                 px = nx; py = ny;
                 uint8_t& cell = maze[py][px];
                 if (cell == 2) { cell = 0; h.treats++; h.xp += 1; needs_interact(needs, true);
-                    if (esp_random()%100 < 30) show_msg("yum, a treat! (+1 xp)"); hero_levelcheck(h); }
+                    if (esp_random()%100 < 30) show_msg("yum, a treat! (+1 xp)");
+                    hero_levelcheck(h); }
                 else if (cell == 5) { cell = 0; int it = esp_random()%4;
                     if (it==0) { h.potions++; show_msg("found a berry potion!"); }
                     else if (it==1) { h.charms++; h.atk++; show_msg("a lucky charm! atk up"); }

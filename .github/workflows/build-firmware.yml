@@ -81,10 +81,12 @@ jobs:
           name: fox-data
           path: firmware/main/data
 
-      - name: Source checks (warnings only, never fail the build)
+      - name: Regenerate derived files (never fail the build)
         continue-on-error: true
         run: |
-          python3 tools/check_decl_order.py || echo "::warning::declaration-order check flagged something (build continues)"
+          # These keep generated artifacts in sync with the source tables. They
+          # are NOT linters: tools/check_decl_order.py and tools/preflight.py are
+          # for local use only and are intentionally not run here.
           python3 tools/gen_teachable.py || echo "::warning::teach list not regenerated (build continues)"
           python3 tools/train_brain.py --emit-policy firmware/main/brain_policy.h || echo "::warning::policy table not regenerated (committed one used)"
       - name: Precompute MultiNet phonemes (Espressif's recommended g2p)

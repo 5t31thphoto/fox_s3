@@ -253,26 +253,14 @@ static void face_lipsync_from_mic_once() {
 
 // Standalone "reactive puppet" app.
 void face_lipsync_mode() {
-    // Puppet mode is self-contained: it sets its own mic state on entry so it is
-    // NEVER affected by whatever push-to-talk / recognition did before it.
-    //  - amp OFF (no feedback), mic at puppet gain, fresh mic session
-    //  - reset the lip ceiling so the first words aren't under/over-driven
-    if (!g_echo_ok) { speak("my ears aren't working right now~"); return; }
     audio_speaker_end();
-    audio_mic_speech_gain(false);
-    audio_mic_end();                 // drop any half-open capture from before
-    s_lip_max = 10.0f; s_last_loud = millis();
-    face_caption("puppet mode - click to stop");
-    uint32_t t0 = millis();
+    if (!g_echo_ok) return;
     while (true) {
         M5.update();
-        if (M5.BtnA.wasClicked() || M5.BtnA.wasDoubleClicked()) break;
+        if (M5.BtnA.wasClicked()) break;
         face_lipsync_from_mic_once();
         face_draw(MOOD_HAPPY);
         delay(1);
     }
-    face_set_mouth(0);
     audio_mic_end();
-    face_draw(MOOD_HAPPY);
-    (void)t0;
 }
